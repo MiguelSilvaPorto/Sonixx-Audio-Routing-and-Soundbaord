@@ -90,6 +90,25 @@ If you've ever wanted to share a YouTube video's audio in a call, play your Spot
 
 ## 🏗 Architecture
 
+```mermaid
+graph TD
+    APP1["App Source (Chrome)\nNamed Pipe + PAC DLL"]
+    APP2["App Source (Spotify)\nNamed Pipe + PAC DLL"]
+    MIC["Mic Source (Realtek)\nWASAPI Input Callback"]
+
+    APP1 --> MIX
+    APP2 --> MIX
+    MIC --> MIX
+
+    MIX["AudioRouter._out_cb()\nHardware-synced WASAPI callback\nMix → master vol/mute → clip to ±1.0"]
+
+    MIX --> VBC["VB-Cable Output\n(Virtual Mic)"]
+    MIX --> MON["Monitor (Loopback)\nHeadphones"]
+```
+
+<details>
+<summary>ASCII fallback (click to expand)</summary>
+
 ```
 ┌──────────────────────────────────────────────────────┐
 │                   Sonixx Application                 │
@@ -115,11 +134,13 @@ If you've ever wanted to share a YouTube video's audio in a call, play your Spot
 │            ┌───────▼───┐   ┌───────▼──────┐          │
 │            │ VB-Cable  │   │   Monitor    │          │
 │            │  Output   │   │  (Loopback)  │          │
-│            │ (Virtual  │   │  Headphones  │          │ 
+│            │ (Virtual  │   │  Headphones  │          │
 │            │   Mic)    │   │              │          │
 │            └───────────┘   └──────────────┘          │
 └──────────────────────────────────────────────────────┘
 ```
+
+</details>
 
 ### Core Modules
 
