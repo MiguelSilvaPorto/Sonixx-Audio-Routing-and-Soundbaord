@@ -83,10 +83,10 @@ class SourceRow(ctk.CTkFrame):
         step(0)
 
 DEFAULT_HOTKEYS = {
-    "mute_master": {"label": "Toggle Master Mute", "combos": ["ctrl+alt+m", "", ""]},
-    "toggle_router": {"label": "Toggle Audio Router", "combos": ["ctrl+alt+s", "", ""]},
-    "toggle_monitor": {"label": "Toggle Monitor Mix", "combos": ["ctrl+alt+o", "", ""]},
-    "scan_apps": {"label": "Scan Audio Apps", "combos": ["ctrl+alt+r", "", ""]}
+    "mute_master": {"label": "Toggle Master Mute", "default": "ctrl+alt+m"},
+    "toggle_router": {"label": "Toggle Audio Router", "default": "ctrl+alt+s"},
+    "toggle_monitor": {"label": "Toggle Monitor Mix", "default": "ctrl+alt+o"},
+    "scan_apps": {"label": "Scan Audio Apps", "default": "ctrl+alt+r"}
 }
 
 
@@ -98,7 +98,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.transient(parent)
         self.grab_set()
 
-        w, h = 680, 580
+        w, h = 600, 520
         px = parent.winfo_x() + (parent.winfo_width() - w) // 2
         py = parent.winfo_y() + (parent.winfo_height() - h) // 2
         self.geometry(f"{w}x{h}+{px}+{py}")
@@ -108,9 +108,10 @@ class SettingsWindow(ctk.CTkToplevel):
         self.hotkeys = {}
         saved_hk = parent.settings.get("hotkeys", {})
         for act_id, default_info in DEFAULT_HOTKEYS.items():
-            combos = saved_hk.get(act_id, default_info["combos"])
-            full_combos = list(combos) + ["", "", ""]
-            self.hotkeys[act_id] = full_combos[:3]
+            val = saved_hk.get(act_id, default_info["default"])
+            if isinstance(val, list):
+                val = val[0] if val else ""
+            self.hotkeys[act_id] = str(val)
 
         self.inputs = {}
         self._active_hook = None
@@ -150,52 +151,44 @@ class SettingsWindow(ctk.CTkToplevel):
             self.start_sw.select()
 
         # Section 2: Hotkeys
-        ctk.CTkLabel(sf, text="Hotkey Configuration (Up to 3 Combinations per Action)", font=("Segoe UI Semibold", 13), text_color=P["txt"]).pack(anchor="w", pady=(0, 4))
+        ctk.CTkLabel(sf, text="Hotkey Configuration (1 Combination of Up to 3 Keys per Action)", font=("Segoe UI Semibold", 13), text_color=P["txt"]).pack(anchor="w", pady=(0, 4))
         ctk.CTkLabel(sf, text="Click ⌨ to record a key combination (e.g. Ctrl+Alt+M or F9), or type directly.",
                       font=("Segoe UI", 10), text_color=P["dim"]).pack(anchor="w", pady=(0, 8))
 
         hk_frame = ctk.CTkFrame(sf, fg_color=P["card"], corner_radius=10, border_width=1, border_color=P["border"])
         hk_frame.pack(fill="x", pady=(0, 10))
-        hk_frame.grid_columnconfigure(0, weight=2)
-        hk_frame.grid_columnconfigure((1, 2, 3), weight=3)
+        hk_frame.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(hk_frame, text="Action", font=("Segoe UI Semibold", 11), text_color=P["dim"]).grid(row=0, column=0, padx=12, pady=8, sticky="w")
-        for c_idx in range(1, 4):
-            ctk.CTkLabel(hk_frame, text=f"Combo {c_idx}", font=("Segoe UI Semibold", 11), text_color=P["dim"]).grid(row=0, column=c_idx, padx=6, pady=8)
-
-        for row_idx, (act_id, act_info) in enumerate(DEFAULT_HOTKEYS.items(), start=1):
-            ctk.CTkFrame(hk_frame, fg_color=P["border"], height=1).grid(row=row_idx * 2 - 1, column=0, columnspan=4, sticky="ew", padx=8)
+        for row_idx, (act_id, act_info) in enumerate(DEFAULT_HOTKEYS.items()):
+            if row_idx > 0:
+                ctk.CTkFrame(hk_frame, fg_color=P["border"], height=1).pack(fill="x", padx=8)
 
             r_frame = ctk.CTkFrame(hk_frame, fg_color="transparent")
-            r_frame.grid(row=row_idx * 2, column=0, columnspan=4, sticky="ew", padx=8, pady=6)
-            r_frame.grid_columnconfigure(0, weight=2)
-            r_frame.grid_columnconfigure((1, 2, 3), weight=3)
+            r_frame.pack(fill="x", padx=12, pady=8)
+            r_frame.grid_columnconfigure(0, weight=1)
 
-            ctk.CTkLabel(r_frame, text=act_info["label"], font=("Segoe UI Semibold", 11), text_color=P["txt"]).grid(row=0, column=0, sticky="w", padx=(4, 8))
+            ctk.CTkLabel(r_frame, text=act_info["label"], font=("Segoe UI Semibold", 11), text_color=P["txt"]).grid(row=0, column=0, sticky="w")
 
-            self.inputs[act_id] = []
-            for slot_idx in range(3):
-                slot_frame = ctk.CTkFrame(r_frame, fg_color="transparent")
-                slot_frame.grid(row=0, column=slot_idx + 1, sticky="ew", padx=2)
-                slot_frame.grid_columnconfigure(0, weight=1)
+            slot_frame = ctk.CTkFrame(r_frame, fg_color="transparent")
+            slot_frame.grid(row=0, column=1, sticky="e")
 
-                val = self.hotkeys[act_id][slot_idx]
-                entry = ctk.CTkEntry(slot_frame, height=28, font=("Consolas", 10),
-                                     fg_color=P["card2"], border_color=P["border"], text_color=P["txt"],
-                                     corner_radius=6)
-                entry.insert(0, val)
-                entry.grid(row=0, column=0, sticky="ew", padx=(0, 2))
-                self.inputs[act_id].append(entry)
+            val = self.hotkeys[act_id]
+            entry = ctk.CTkEntry(slot_frame, width=150, height=28, font=("Consolas", 11),
+                                 fg_color=P["card2"], border_color=P["border"], text_color=P["txt"],
+                                 corner_radius=6)
+            entry.insert(0, val)
+            entry.grid(row=0, column=0, padx=(0, 4))
+            self.inputs[act_id] = entry
 
-                rec_btn = ctk.CTkButton(slot_frame, text="⌨", width=26, height=28, font=("Segoe UI", 11),
-                                         fg_color=P["card2"], hover_color=P["hover"], text_color=P["dim"],
-                                         corner_radius=6, command=lambda a=act_id, s=slot_idx, e=entry: self._record_hotkey(a, s, e))
-                rec_btn.grid(row=0, column=1, padx=(0, 2))
+            rec_btn = ctk.CTkButton(slot_frame, text="⌨ Record", width=75, height=28, font=("Segoe UI", 11),
+                                     fg_color=P["card2"], hover_color=P["hover"], text_color=P["dim"],
+                                     corner_radius=6, command=lambda a=act_id, e=entry: self._record_hotkey(a, e))
+            rec_btn.grid(row=0, column=1, padx=(0, 4))
 
-                clr_btn = ctk.CTkButton(slot_frame, text="✕", width=22, height=28, font=("Segoe UI", 10),
-                                         fg_color="transparent", hover_color=P["red_d"], text_color=P["muted"],
-                                         corner_radius=6, command=lambda e=entry: self._clear_slot(e))
-                clr_btn.grid(row=0, column=2)
+            clr_btn = ctk.CTkButton(slot_frame, text="✕", width=26, height=28, font=("Segoe UI", 10),
+                                     fg_color="transparent", hover_color=P["red_d"], text_color=P["muted"],
+                                     corner_radius=6, command=lambda e=entry: self._clear_slot(e))
+            clr_btn.grid(row=0, column=2)
 
         # Footer Actions
         foot = ctk.CTkFrame(self, fg_color=P["card"], corner_radius=0, height=50)
@@ -219,16 +212,13 @@ class SettingsWindow(ctk.CTkToplevel):
 
     def _reset_defaults(self):
         for act_id, info in DEFAULT_HOTKEYS.items():
-            combos = info["combos"]
-            for s_idx in range(3):
-                val = combos[s_idx] if s_idx < len(combos) else ""
-                entry = self.inputs[act_id][s_idx]
-                entry.delete(0, "end")
-                entry.insert(0, val)
+            entry = self.inputs[act_id]
+            entry.delete(0, "end")
+            entry.insert(0, info["default"])
         self.tray_sw.select()
         self.start_sw.deselect()
 
-    def _record_hotkey(self, act_id, slot_idx, entry):
+    def _record_hotkey(self, act_id, entry):
         if self._active_hook:
             try: keyboard.unhook(self._active_hook)
             except: pass
@@ -256,13 +246,13 @@ class SettingsWindow(ctk.CTkToplevel):
                        "alt": "alt", "left alt": "alt", "right alt": "alt", "menu": "alt",
                        "shift": "shift", "left shift": "shift", "right shift": "shift"}
             clean_k = mod_map.get(k, k)
-            if clean_k not in keys_pressed:
+            if clean_k not in keys_pressed and len(keys_pressed) < 3:
                 keys_pressed.append(clean_k)
 
             non_mods = [x for x in keys_pressed if x not in ["ctrl", "alt", "shift"]]
-            if non_mods:
+            if non_mods or len(keys_pressed) >= 3:
                 mods = [x for x in keys_pressed if x in ["ctrl", "alt", "shift"]]
-                combo_str = "+".join(mods + non_mods[:1])
+                combo_str = "+".join(mods + non_mods[:1]) if non_mods else "+".join(keys_pressed[:3])
                 if self._active_hook:
                     try: keyboard.unhook(self._active_hook)
                     except: pass
@@ -295,9 +285,8 @@ class SettingsWindow(ctk.CTkToplevel):
             self._active_hook = None
 
         new_hotkeys = {}
-        for act_id, entries in self.inputs.items():
-            combos = [e.get().strip().lower() for e in entries]
-            new_hotkeys[act_id] = combos
+        for act_id, entry in self.inputs.items():
+            new_hotkeys[act_id] = entry.get().strip().lower()
 
         self.parent.settings["hotkeys"] = new_hotkeys
         self.parent.settings["tray"] = bool(self.tray_sw.get())
@@ -381,7 +370,7 @@ class App(ctk.CTk):
         defaults = {
             "tray": True,
             "startup": False,
-            "hotkeys": {k: v["combos"][:] for k, v in DEFAULT_HOTKEYS.items()}
+            "hotkeys": {k: v["default"] for k, v in DEFAULT_HOTKEYS.items()}
         }
         if os.path.exists(SETTINGS_FILE):
             try:
@@ -390,12 +379,10 @@ class App(ctk.CTk):
                 defaults.update(saved)
                 saved_hk = defaults.get("hotkeys", {})
                 for k, v in DEFAULT_HOTKEYS.items():
-                    if k not in saved_hk or not isinstance(saved_hk[k], list):
-                        saved_hk[k] = v["combos"][:]
-                    else:
-                        while len(saved_hk[k]) < 3:
-                            saved_hk[k].append("")
-                        saved_hk[k] = saved_hk[k][:3]
+                    val = saved_hk.get(k, v["default"])
+                    if isinstance(val, list):
+                        val = val[0] if val else ""
+                    saved_hk[k] = str(val)
                 defaults["hotkeys"] = saved_hk
             except Exception as e:
                 print(f"[UI] Settings load error: {e}")
@@ -418,17 +405,18 @@ class App(ctk.CTk):
         }
 
         hotkeys = self.settings.get("hotkeys", {})
-        for act_id, combos in hotkeys.items():
+        for act_id, combo in hotkeys.items():
             cb = action_callbacks.get(act_id)
             if not cb:
                 continue
-            for combo in combos:
-                c = combo.strip().lower()
-                if c:
-                    try:
-                        keyboard.add_hotkey(c, cb)
-                    except Exception as e:
-                        print(f"[UI] Failed to bind hotkey '{c}' for '{act_id}': {e}")
+            if isinstance(combo, list):
+                combo = combo[0] if combo else ""
+            c = str(combo).strip().lower()
+            if c:
+                try:
+                    keyboard.add_hotkey(c, cb)
+                except Exception as e:
+                    print(f"[UI] Failed to bind hotkey '{c}' for '{act_id}': {e}")
 
     def _toggle_router_hotkey(self):
         if self._running:
