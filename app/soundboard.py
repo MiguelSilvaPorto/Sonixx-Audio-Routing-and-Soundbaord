@@ -1,7 +1,10 @@
 """Soundboard Module — Pre-decoded audio slots and real-time sound effect mixing."""
-import os, threading
+import os, shutil, threading
 import numpy as np
 import miniaudio
+
+SOUNDS_DIR = os.path.join(os.path.expanduser("~"), ".sonixx", "sounds")
+os.makedirs(SOUNDS_DIR, exist_ok=True)
 
 
 class SoundSlot:
@@ -22,6 +25,19 @@ class SoundSlot:
         """Decode audio file (MP3, WAV, FLAC, OGG) to 48kHz stereo Float32 NumPy array."""
         if not path or not os.path.exists(path):
             return False
+
+        # Copy to managed local sound directory so user can delete/move original file
+        try:
+            abs_path = os.path.abspath(path)
+            abs_managed = os.path.abspath(SOUNDS_DIR)
+            if not abs_path.startswith(abs_managed):
+                ext = os.path.splitext(path)[1]
+                target_path = os.path.join(SOUNDS_DIR, f"slot_{self.slot_id}{ext}")
+                import shutil
+                shutil.copy2(path, target_path)
+                path = target_path
+        except Exception as e:
+            print(f"[SoundSlot] Copy warning for '{path}': {e}")
 
         try:
             decoded = miniaudio.decode_file(
