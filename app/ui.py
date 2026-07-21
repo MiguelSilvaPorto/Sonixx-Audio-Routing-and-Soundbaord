@@ -82,6 +82,232 @@ class SourceRow(ctk.CTkFrame):
                 self.after(10, lambda: step(h+4))
         step(0)
 
+DEFAULT_HOTKEYS = {
+    "mute_master": {"label": "Toggle Master Mute", "combos": ["ctrl+alt+m", "", ""]},
+    "toggle_router": {"label": "Toggle Audio Router", "combos": ["ctrl+alt+s", "", ""]},
+    "toggle_monitor": {"label": "Toggle Monitor Mix", "combos": ["ctrl+alt+o", "", ""]},
+    "scan_apps": {"label": "Scan Audio Apps", "combos": ["ctrl+alt+r", "", ""]}
+}
+
+
+class SettingsWindow(ctk.CTkToplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.title("Sonixx - Settings & Hotkey Configuration")
+        self.transient(parent)
+        self.grab_set()
+
+        w, h = 680, 580
+        px = parent.winfo_x() + (parent.winfo_width() - w) // 2
+        py = parent.winfo_y() + (parent.winfo_height() - h) // 2
+        self.geometry(f"{w}x{h}+{px}+{py}")
+        self.minsize(w, h)
+        self.configure(fg_color=P["bg"])
+
+        self.hotkeys = {}
+        saved_hk = parent.settings.get("hotkeys", {})
+        for act_id, default_info in DEFAULT_HOTKEYS.items():
+            combos = saved_hk.get(act_id, default_info["combos"])
+            full_combos = list(combos) + ["", "", ""]
+            self.hotkeys[act_id] = full_combos[:3]
+
+        self.inputs = {}
+        self._active_hook = None
+        self._build_ui()
+
+    def _build_ui(self):
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        # Header
+        hdr = ctk.CTkFrame(self, fg_color=P["card"], corner_radius=0, height=45)
+        hdr.grid(row=0, column=0, sticky="ew")
+        hdr.pack_propagate(False)
+        ctk.CTkLabel(hdr, text="⚙ Settings & Hotkey Configuration", font=("Segoe UI Semibold", 15), text_color=P["accent2"]).pack(side="left", padx=16)
+
+        # Scrollable Body
+        sf = ctk.CTkScrollableFrame(self, fg_color="transparent", scrollbar_button_color=P["border"])
+        sf.grid(row=1, column=0, sticky="nsew", padx=16, pady=12)
+        sf.grid_columnconfigure(0, weight=1)
+
+        # Section 1: General Preferences
+        ctk.CTkLabel(sf, text="General Preferences", font=("Segoe UI Semibold", 13), text_color=P["txt"]).pack(anchor="w", pady=(0, 6))
+        
+        gf = ctk.CTkFrame(sf, fg_color=P["card"], corner_radius=10, border_width=1, border_color=P["border"])
+        gf.pack(fill="x", pady=(0, 16), ipady=4)
+
+        self.tray_sw = ctk.CTkSwitch(gf, text="Minimize to System Tray on Close", font=("Segoe UI", 11), text_color=P["dim"],
+                                     progress_color=P["accent"], button_color="#fff")
+        self.tray_sw.pack(anchor="w", padx=14, pady=8)
+        if self.parent.settings.get("tray", True):
+            self.tray_sw.select()
+
+        self.start_sw = ctk.CTkSwitch(gf, text="Start Sonixx automatically with Windows", font=("Segoe UI", 11), text_color=P["dim"],
+                                      progress_color=P["accent"], button_color="#fff")
+        self.start_sw.pack(anchor="w", padx=14, pady=(0, 8))
+        if self.parent.settings.get("startup", False):
+            self.start_sw.select()
+
+        # Section 2: Hotkeys
+        ctk.CTkLabel(sf, text="Hotkey Configuration (Up to 3 Combinations per Action)", font=("Segoe UI Semibold", 13), text_color=P["txt"]).pack(anchor="w", pady=(0, 4))
+        ctk.CTkLabel(sf, text="Click ⌨ to record a key combination (e.g. Ctrl+Alt+M or F9), or type directly.",
+                      font=("Segoe UI", 10), text_color=P["dim"]).pack(anchor="w", pady=(0, 8))
+
+        hk_frame = ctk.CTkFrame(sf, fg_color=P["card"], corner_radius=10, border_width=1, border_color=P["border"])
+        hk_frame.pack(fill="x", pady=(0, 10))
+        hk_frame.grid_columnconfigure(0, weight=2)
+        hk_frame.grid_columnconfigure((1, 2, 3), weight=3)
+
+        ctk.CTkLabel(hk_frame, text="Action", font=("Segoe UI Semibold", 11), text_color=P["dim"]).grid(row=0, column=0, padx=12, pady=8, sticky="w")
+        for c_idx in range(1, 4):
+            ctk.CTkLabel(hk_frame, text=f"Combo {c_idx}", font=("Segoe UI Semibold", 11), text_color=P["dim"]).grid(row=0, column=c_idx, padx=6, pady=8)
+
+        for row_idx, (act_id, act_info) in enumerate(DEFAULT_HOTKEYS.items(), start=1):
+            ctk.CTkFrame(hk_frame, fg_color=P["border"], height=1).grid(row=row_idx * 2 - 1, column=0, columnspan=4, sticky="ew", padx=8)
+
+            r_frame = ctk.CTkFrame(hk_frame, fg_color="transparent")
+            r_frame.grid(row=row_idx * 2, column=0, columnspan=4, sticky="ew", padx=8, pady=6)
+            r_frame.grid_columnconfigure(0, weight=2)
+            r_frame.grid_columnconfigure((1, 2, 3), weight=3)
+
+            ctk.CTkLabel(r_frame, text=act_info["label"], font=("Segoe UI Semibold", 11), text_color=P["txt"]).grid(row=0, column=0, sticky="w", padx=(4, 8))
+
+            self.inputs[act_id] = []
+            for slot_idx in range(3):
+                slot_frame = ctk.CTkFrame(r_frame, fg_color="transparent")
+                slot_frame.grid(row=0, column=slot_idx + 1, sticky="ew", padx=2)
+                slot_frame.grid_columnconfigure(0, weight=1)
+
+                val = self.hotkeys[act_id][slot_idx]
+                entry = ctk.CTkEntry(slot_frame, height=28, font=("Consolas", 10),
+                                     fg_color=P["card2"], border_color=P["border"], text_color=P["txt"],
+                                     corner_radius=6)
+                entry.insert(0, val)
+                entry.grid(row=0, column=0, sticky="ew", padx=(0, 2))
+                self.inputs[act_id].append(entry)
+
+                rec_btn = ctk.CTkButton(slot_frame, text="⌨", width=26, height=28, font=("Segoe UI", 11),
+                                         fg_color=P["card2"], hover_color=P["hover"], text_color=P["dim"],
+                                         corner_radius=6, command=lambda a=act_id, s=slot_idx, e=entry: self._record_hotkey(a, s, e))
+                rec_btn.grid(row=0, column=1, padx=(0, 2))
+
+                clr_btn = ctk.CTkButton(slot_frame, text="✕", width=22, height=28, font=("Segoe UI", 10),
+                                         fg_color="transparent", hover_color=P["red_d"], text_color=P["muted"],
+                                         corner_radius=6, command=lambda e=entry: self._clear_slot(e))
+                clr_btn.grid(row=0, column=2)
+
+        # Footer Actions
+        foot = ctk.CTkFrame(self, fg_color=P["card"], corner_radius=0, height=50)
+        foot.grid(row=2, column=0, sticky="ew")
+        foot.pack_propagate(False)
+
+        ctk.CTkButton(foot, text="⟲ Reset Defaults", width=120, height=32, font=("Segoe UI", 11),
+                       fg_color=P["card2"], hover_color=P["hover"], text_color=P["dim"],
+                       corner_radius=8, command=self._reset_defaults).pack(side="left", padx=16, pady=9)
+
+        ctk.CTkButton(foot, text="Save & Apply", width=120, height=32, font=("Segoe UI Semibold", 12),
+                       fg_color=P["accent"], hover_color=P["accent2"], text_color="#fff",
+                       corner_radius=8, command=self._save_and_close).pack(side="right", padx=16, pady=9)
+
+        ctk.CTkButton(foot, text="Cancel", width=80, height=32, font=("Segoe UI", 11),
+                       fg_color="transparent", hover_color=P["hover"], text_color=P["dim"],
+                       corner_radius=8, command=self._cancel).pack(side="right", padx=(0, 4), pady=9)
+
+    def _clear_slot(self, entry):
+        entry.delete(0, "end")
+
+    def _reset_defaults(self):
+        for act_id, info in DEFAULT_HOTKEYS.items():
+            combos = info["combos"]
+            for s_idx in range(3):
+                val = combos[s_idx] if s_idx < len(combos) else ""
+                entry = self.inputs[act_id][s_idx]
+                entry.delete(0, "end")
+                entry.insert(0, val)
+        self.tray_sw.select()
+        self.start_sw.deselect()
+
+    def _record_hotkey(self, act_id, slot_idx, entry):
+        if self._active_hook:
+            try: keyboard.unhook(self._active_hook)
+            except: pass
+            self._active_hook = None
+
+        entry.delete(0, "end")
+        entry.insert(0, "Press keys...")
+        entry.configure(border_color=P["accent"], text_color=P["accent2"])
+
+        keys_pressed = []
+
+        def on_key_event(event):
+            if event.event_type != "down":
+                return
+            k = event.name.lower()
+            if k in ["esc", "escape"]:
+                if self._active_hook:
+                    try: keyboard.unhook(self._active_hook)
+                    except: pass
+                    self._active_hook = None
+                self.after(0, lambda: self._finish_recording(entry, ""))
+                return
+
+            mod_map = {"ctrl": "ctrl", "control": "ctrl", "left ctrl": "ctrl", "right ctrl": "ctrl",
+                       "alt": "alt", "left alt": "alt", "right alt": "alt", "menu": "alt",
+                       "shift": "shift", "left shift": "shift", "right shift": "shift"}
+            clean_k = mod_map.get(k, k)
+            if clean_k not in keys_pressed:
+                keys_pressed.append(clean_k)
+
+            non_mods = [x for x in keys_pressed if x not in ["ctrl", "alt", "shift"]]
+            if non_mods:
+                mods = [x for x in keys_pressed if x in ["ctrl", "alt", "shift"]]
+                combo_str = "+".join(mods + non_mods[:1])
+                if self._active_hook:
+                    try: keyboard.unhook(self._active_hook)
+                    except: pass
+                    self._active_hook = None
+                self.after(0, lambda: self._finish_recording(entry, combo_str))
+
+        try:
+            self._active_hook = keyboard.hook(on_key_event)
+        except Exception as e:
+            print(f"[Settings] Key record error: {e}")
+            entry.delete(0, "end")
+            entry.configure(border_color=P["border"], text_color=P["txt"])
+
+    def _finish_recording(self, entry, combo_str):
+        entry.delete(0, "end")
+        entry.insert(0, combo_str)
+        entry.configure(border_color=P["border"], text_color=P["txt"])
+
+    def _cancel(self):
+        if self._active_hook:
+            try: keyboard.unhook(self._active_hook)
+            except: pass
+            self._active_hook = None
+        self.destroy()
+
+    def _save_and_close(self):
+        if self._active_hook:
+            try: keyboard.unhook(self._active_hook)
+            except: pass
+            self._active_hook = None
+
+        new_hotkeys = {}
+        for act_id, entries in self.inputs.items():
+            combos = [e.get().strip().lower() for e in entries]
+            new_hotkeys[act_id] = combos
+
+        self.parent.settings["hotkeys"] = new_hotkeys
+        self.parent.settings["tray"] = bool(self.tray_sw.get())
+        self.parent.settings["startup"] = bool(self.start_sw.get())
+
+        self.parent._save_settings_ui()
+        self.parent._apply_hotkeys()
+        self.destroy()
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -140,11 +366,10 @@ class App(ctk.CTk):
         self.router = AudioRouter(self.pa)
         self.mic_rows={}; self.app_rows={}
         self._running=False; self._peak_job=None
+        self._settings_win = None
         
         # Hotkey setup
-        try:
-            keyboard.add_hotkey('ctrl+alt+m', self._mute_toggle_hotkey)
-        except: pass
+        self._apply_hotkeys()
 
         self.protocol("WM_DELETE_WINDOW", self._on_window_close)
         
@@ -153,11 +378,78 @@ class App(ctk.CTk):
 
     def _load_settings(self):
         os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        defaults = {
+            "tray": True,
+            "startup": False,
+            "hotkeys": {k: v["combos"][:] for k, v in DEFAULT_HOTKEYS.items()}
+        }
         if os.path.exists(SETTINGS_FILE):
             try:
-                with open(SETTINGS_FILE, "r") as f: self.settings = json.load(f)
-            except: self.settings = {"tray": True, "startup": False}
-        else: self.settings = {"tray": True, "startup": False}
+                with open(SETTINGS_FILE, "r") as f:
+                    saved = json.load(f)
+                defaults.update(saved)
+                saved_hk = defaults.get("hotkeys", {})
+                for k, v in DEFAULT_HOTKEYS.items():
+                    if k not in saved_hk or not isinstance(saved_hk[k], list):
+                        saved_hk[k] = v["combos"][:]
+                    else:
+                        while len(saved_hk[k]) < 3:
+                            saved_hk[k].append("")
+                        saved_hk[k] = saved_hk[k][:3]
+                defaults["hotkeys"] = saved_hk
+            except Exception as e:
+                print(f"[UI] Settings load error: {e}")
+        self.settings = defaults
+
+    def _apply_hotkeys(self):
+        try:
+            keyboard.unhook_all_hotkeys()
+        except Exception:
+            try:
+                keyboard.clear_all_hotkeys()
+            except Exception:
+                pass
+
+        action_callbacks = {
+            "mute_master": lambda: self.after(0, self._mute),
+            "toggle_router": lambda: self.after(0, self._toggle_router_hotkey),
+            "toggle_monitor": lambda: self.after(0, self._toggle_monitor_hotkey_action),
+            "scan_apps": lambda: self.after(0, self._scan_apps),
+        }
+
+        hotkeys = self.settings.get("hotkeys", {})
+        for act_id, combos in hotkeys.items():
+            cb = action_callbacks.get(act_id)
+            if not cb:
+                continue
+            for combo in combos:
+                c = combo.strip().lower()
+                if c:
+                    try:
+                        keyboard.add_hotkey(c, cb)
+                    except Exception as e:
+                        print(f"[UI] Failed to bind hotkey '{c}' for '{act_id}': {e}")
+
+    def _toggle_router_hotkey(self):
+        if self._running:
+            self._stop()
+        else:
+            self._start()
+
+    def _toggle_monitor_hotkey_action(self):
+        if hasattr(self, "monitor_switch"):
+            cur = bool(self.monitor_switch.get())
+            if cur:
+                self.monitor_switch.deselect()
+            else:
+                self.monitor_switch.select()
+        self._toggle_monitor()
+
+    def _open_settings(self):
+        if hasattr(self, "_settings_win") and self._settings_win and self._settings_win.winfo_exists():
+            self._settings_win.lift()
+        else:
+            self._settings_win = SettingsWindow(self)
 
     def _save_settings(self):
         with open(SETTINGS_FILE, "w") as f: json.dump(self.settings, f)
@@ -249,8 +541,15 @@ class App(ctk.CTk):
         else:
             ctk.CTkLabel(h,text=f"◉ {SONIXX}",font=("Segoe UI Black",20),text_color=P["accent2"]).grid(row=0,column=0,padx=20,pady=11)
             
-        self.status_lbl=ctk.CTkLabel(h,text="● Stopped",font=("Segoe UI Semibold",12),text_color=P["red"])
-        self.status_lbl.grid(row=0,column=2,sticky="e",padx=20)
+        hf = ctk.CTkFrame(h, fg_color="transparent")
+        hf.grid(row=0, column=2, sticky="e", padx=20)
+        self.status_lbl = ctk.CTkLabel(hf, text="● Stopped", font=("Segoe UI Semibold", 12), text_color=P["red"])
+        self.status_lbl.pack(side="left", padx=(0, 12))
+        self.settings_btn = ctk.CTkButton(hf, text="⚙ Settings", width=90, height=28, font=("Segoe UI Semibold", 11),
+                                          fg_color=P["card2"], hover_color=P["hover"], text_color=P["txt"],
+                                          corner_radius=8, command=self._open_settings)
+        self.settings_btn.pack(side="left")
+
         # Body
         body=ctk.CTkFrame(self,fg_color="transparent"); body.grid(row=1,column=0,sticky="nsew",padx=14,pady=(8,0))
         body.grid_columnconfigure(0,weight=1); body.grid_columnconfigure(1,weight=1); body.grid_rowconfigure(0,weight=1)
