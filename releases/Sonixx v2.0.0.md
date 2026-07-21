@@ -12,9 +12,9 @@ Sonixx v2.0.0 transforms the application from a live virtual audio router into a
 - **Integrated Tabbed Layout** — access the new **"📣 Soundboard"** panel right next to your audio sources
 - **9 Independent Sound Slots** — register up to 9 custom audio effects (`.mp3`, `.wav`, `.flac`, `.ogg`)
 - **Instant 0ms Playback** — audio files are pre-decoded into 48kHz Float32 stereo PCM buffers upon selection for zero-latency hotkey response
-- **Managed Local Storage** — audio files are automatically copied to local application storage (`~/.sonixx/sounds/`), ensuring soundboard slots remain fully functional even if original files are moved or deleted
+- **Managed Local Storage** — audio files are automatically copied to local application root storage (`sounds/`), ensuring soundboard slots remain fully functional even if original files are moved or deleted
 - **Dedicated Global Hotkeys** — trigger soundboard slots 1 through 9 instantly using `Ctrl+Alt+1` through `Ctrl+Alt+9` (fully rebindable)
-- **Per-Slot Controls** — custom label naming, native file picker integration, preview play/stop toggle, and slot clear buttons
+- **Per-Slot Controls** — custom label naming with explicit `✓` save confirmation, native file picker integration, preview play/stop toggle, and slot clear buttons
 
 ### 🎤 Independent Audio Mute Toggles & Hotkeys
 - **Toggle Mute Microphones** — mute all physical microphones instantly (`Ctrl+Alt+N`) while keeping application audio streaming
