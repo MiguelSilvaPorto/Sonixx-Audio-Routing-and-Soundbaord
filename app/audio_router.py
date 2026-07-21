@@ -259,6 +259,8 @@ class AudioRouter:
         self.loopback_dev = None
         self.output_dev = None
         self.mon_rate = 48000
+        self.mics_mute = False
+        self.apps_mute = False
 
     # ── Mic sources ──────────────────────────────────────────────────────
     def add_mic(self, dev_info) -> str:
@@ -470,29 +472,31 @@ class AudioRouter:
             
         mixed = None
         
-        # Add app sources
-        with self._lock:
-            app_list = list(self.app_sources.values())
-        for src in app_list:
-            buf = src.read()
-            if buf is not None:
-                if mixed is None:
-                    mixed = buf.copy()
-                else:
-                    ml = min(len(mixed), len(buf))
-                    mixed[:ml] += buf[:ml]
+        # Add app sources (if apps not muted)
+        if not self.apps_mute:
+            with self._lock:
+                app_list = list(self.app_sources.values())
+            for src in app_list:
+                buf = src.read()
+                if buf is not None:
+                    if mixed is None:
+                        mixed = buf.copy()
+                    else:
+                        ml = min(len(mixed), len(buf))
+                        mixed[:ml] += buf[:ml]
 
-        # Add mic sources
-        with self._lock:
-            mic_list = list(self.mic_sources.values())
-        for src in mic_list:
-            buf = src.read()
-            if buf is not None:
-                if mixed is None:
-                    mixed = buf.copy()
-                else:
-                    ml = min(len(mixed), len(buf))
-                    mixed[:ml] += buf[:ml]
+        # Add mic sources (if mics not muted)
+        if not self.mics_mute:
+            with self._lock:
+                mic_list = list(self.mic_sources.values())
+            for src in mic_list:
+                buf = src.read()
+                if buf is not None:
+                    if mixed is None:
+                        mixed = buf.copy()
+                    else:
+                        ml = min(len(mixed), len(buf))
+                        mixed[:ml] += buf[:ml]
 
         if mixed is None:
             mixed = np.zeros(frame_count * 2, dtype=np.float32)

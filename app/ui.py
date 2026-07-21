@@ -84,6 +84,8 @@ class SourceRow(ctk.CTkFrame):
 
 DEFAULT_HOTKEYS = {
     "mute_master": {"label": "Toggle Master Mute", "default": "ctrl+alt+m"},
+    "mute_mics": {"label": "Toggle Mute Microphones", "default": "ctrl+alt+n"},
+    "mute_apps": {"label": "Toggle Mute Applications", "default": "ctrl+alt+a"},
     "toggle_router": {"label": "Toggle Audio Router", "default": "ctrl+alt+s"},
     "toggle_monitor": {"label": "Toggle Monitor Mix", "default": "ctrl+alt+o"},
     "scan_apps": {"label": "Scan Audio Apps", "default": "ctrl+alt+r"}
@@ -399,6 +401,8 @@ class App(ctk.CTk):
 
         action_callbacks = {
             "mute_master": lambda: self.after(0, self._mute),
+            "mute_mics": lambda: self.after(0, self._toggle_mics_mute),
+            "mute_apps": lambda: self.after(0, self._toggle_apps_mute),
             "toggle_router": lambda: self.after(0, self._toggle_router_hotkey),
             "toggle_monitor": lambda: self.after(0, self._toggle_monitor_hotkey_action),
             "scan_apps": lambda: self.after(0, self._scan_apps),
@@ -417,6 +421,28 @@ class App(ctk.CTk):
                     keyboard.add_hotkey(c, cb)
                 except Exception as e:
                     print(f"[UI] Failed to bind hotkey '{c}' for '{act_id}': {e}")
+
+    def _toggle_mics_mute(self):
+        self.router.mics_mute = not self.router.mics_mute
+        state_str = "MUTED" if self.router.mics_mute else "ACTIVE"
+        if hasattr(self, "mic_mute_btn"):
+            if self.router.mics_mute:
+                self.mic_mute_btn.configure(text="🔇", fg_color=P["red_d"], text_color=P["red"])
+            else:
+                self.mic_mute_btn.configure(text="🔊", fg_color=P["card2"], text_color=P["dim"])
+        if hasattr(self, "foot"):
+            self.foot.configure(text=f"Microphones {state_str}")
+
+    def _toggle_apps_mute(self):
+        self.router.apps_mute = not self.router.apps_mute
+        state_str = "MUTED" if self.router.apps_mute else "ACTIVE"
+        if hasattr(self, "app_mute_btn"):
+            if self.router.apps_mute:
+                self.app_mute_btn.configure(text="🔇", fg_color=P["red_d"], text_color=P["red"])
+            else:
+                self.app_mute_btn.configure(text="🔊", fg_color=P["card2"], text_color=P["dim"])
+        if hasattr(self, "foot"):
+            self.foot.configure(text=f"Applications {state_str}")
 
     def _toggle_router_hotkey(self):
         if self._running:
@@ -575,9 +601,13 @@ class App(ctk.CTk):
         ab=ctk.CTkFrame(left,fg_color="transparent"); ab.grid(row=0,column=0,sticky="ew",padx=14,pady=(14,4))
         ab.grid_columnconfigure(0,weight=1)
         ctk.CTkLabel(ab,text="🎵 Applications",font=("Segoe UI Semibold",14),text_color=P["txt"]).grid(row=0,column=0,sticky="w")
+        self.app_mute_btn = ctk.CTkButton(ab, text="🔊", width=32, height=28, font=("Segoe UI", 12),
+                                          fg_color=P["card2"], hover_color=P["hover"], text_color=P["dim"],
+                                          corner_radius=8, command=self._toggle_apps_mute)
+        self.app_mute_btn.grid(row=0, column=1, padx=(4, 4))
         ctk.CTkButton(ab,text="⟳ Scan",width=70,height=28,font=("Segoe UI",11),fg_color=P["card2"],
                        hover_color=P["hover"],text_color=P["dim"],corner_radius=8,
-                       command=self._scan_apps).grid(row=0,column=1,padx=(4,0))
+                       command=self._scan_apps).grid(row=0,column=2)
         # App list
         self.app_scroll=ctk.CTkScrollableFrame(left,fg_color="transparent",scrollbar_button_color=P["border"])
         self.app_scroll.grid(row=1,column=0,sticky="nsew",padx=6,pady=(4,4)); self.app_scroll.grid_columnconfigure(0,weight=1)
@@ -592,8 +622,12 @@ class App(ctk.CTk):
                                      fg_color=P["card2"],border_color=P["border"],button_color=P["accent"],
                                      dropdown_fg_color=P["card2"],text_color=P["txt"],corner_radius=8)
         self.mic_cb.grid(row=0,column=1,padx=(8,4),sticky="ew")
+        self.mic_mute_btn = ctk.CTkButton(mb, text="🔊", width=32, height=28, font=("Segoe UI", 12),
+                                          fg_color=P["card2"], hover_color=P["hover"], text_color=P["dim"],
+                                          corner_radius=8, command=self._toggle_mics_mute)
+        self.mic_mute_btn.grid(row=0, column=2, padx=(0, 4))
         ctk.CTkButton(mb,text="+ Add",width=55,height=28,font=("Segoe UI Semibold",11),fg_color=P["accent"],
-                       hover_color=P["accent2"],corner_radius=8,command=self._add_mic).grid(row=0,column=2)
+                       hover_color=P["accent2"],corner_radius=8,command=self._add_mic).grid(row=0,column=3)
         # Mic source list
         self.mic_scroll=ctk.CTkScrollableFrame(left,fg_color="transparent",scrollbar_button_color=P["border"])
         self.mic_scroll.grid(row=3,column=0,sticky="nsew",padx=6,pady=(4,8)); self.mic_scroll.grid_columnconfigure(0,weight=1)
