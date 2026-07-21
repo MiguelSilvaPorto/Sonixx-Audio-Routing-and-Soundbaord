@@ -8,6 +8,7 @@ dependencies = [
     "comtypes>=1.4.16",
     "customtkinter>=5.2.2",
     "keyboard>=0.13.5",
+    "miniaudio>=1.71",
     "numpy>=2.4.4",
     "pillow>=12.2.0",
     "process-audio-capture>=1.0.0",

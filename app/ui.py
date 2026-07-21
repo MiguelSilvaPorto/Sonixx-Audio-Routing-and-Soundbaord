@@ -88,8 +88,75 @@ DEFAULT_HOTKEYS = {
     "mute_apps": {"label": "Toggle Mute Applications", "default": "ctrl+alt+a"},
     "toggle_router": {"label": "Toggle Audio Router", "default": "ctrl+alt+s"},
     "toggle_monitor": {"label": "Toggle Monitor Mix", "default": "ctrl+alt+o"},
-    "scan_apps": {"label": "Scan Audio Apps", "default": "ctrl+alt+r"}
+    "scan_apps": {"label": "Scan Audio Apps", "default": "ctrl+alt+r"},
+    "soundboard_1": {"label": "Soundboard Slot #1", "default": "ctrl+alt+1"},
+    "soundboard_2": {"label": "Soundboard Slot #2", "default": "ctrl+alt+2"},
+    "soundboard_3": {"label": "Soundboard Slot #3", "default": "ctrl+alt+3"},
+    "soundboard_4": {"label": "Soundboard Slot #4", "default": "ctrl+alt+4"},
+    "soundboard_5": {"label": "Soundboard Slot #5", "default": "ctrl+alt+5"},
+    "soundboard_6": {"label": "Soundboard Slot #6", "default": "ctrl+alt+6"},
+    "soundboard_7": {"label": "Soundboard Slot #7", "default": "ctrl+alt+7"},
+    "soundboard_8": {"label": "Soundboard Slot #8", "default": "ctrl+alt+8"},
+    "soundboard_9": {"label": "Soundboard Slot #9", "default": "ctrl+alt+9"},
 }
+
+
+class SoundboardTileCard(ctk.CTkFrame):
+    def __init__(self, master, slot_id, slot_obj, on_file_pick, on_play_toggle, on_clear, on_name_change, get_hotkey, **kw):
+        super().__init__(master, fg_color=P["card2"], corner_radius=10, border_width=1, border_color=P["border"], **kw)
+        self.slot_id = slot_id
+        self.slot_obj = slot_obj
+        self.on_file_pick = on_file_pick
+        self.on_play_toggle = on_play_toggle
+        self.on_clear = on_clear
+        self.on_name_change = on_name_change
+        self.get_hotkey = get_hotkey
+
+        self.grid_columnconfigure(1, weight=1)
+
+        # Header Row: Badge (#1), Name Entry, Clear Button
+        ctk.CTkLabel(self, text=f"#{slot_id}", font=("Segoe UI Black", 12), text_color=P["accent2"]).grid(row=0, column=0, padx=(8, 4), pady=4)
+        
+        self.name_entry = ctk.CTkEntry(self, height=24, font=("Segoe UI Semibold", 11),
+                                       fg_color=P["card"], border_color=P["border"], text_color=P["txt"], corner_radius=6)
+        self.name_entry.insert(0, slot_obj.name)
+        self.name_entry.grid(row=0, column=1, sticky="ew", padx=2, pady=4)
+        self.name_entry.bind("<FocusOut>", lambda e: on_name_change(slot_id, self.name_entry.get()))
+        self.name_entry.bind("<Return>", lambda e: on_name_change(slot_id, self.name_entry.get()))
+
+        ctk.CTkButton(self, text="✕", width=22, height=22, font=("Segoe UI", 10),
+                       fg_color="transparent", hover_color=P["red_d"], text_color=P["muted"],
+                       corner_radius=4, command=lambda: on_clear(slot_id, self)).grid(row=0, column=2, padx=(2, 6))
+
+        # File Status Label
+        fname = os.path.basename(slot_obj.file_path) if slot_obj.file_path else "No file selected"
+        self.file_lbl = ctk.CTkLabel(self, text=fname, font=("Segoe UI", 9), text_color=P["dim"] if slot_obj.file_path else P["muted"], anchor="w")
+        self.file_lbl.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 2))
+
+        # Bottom Row: Play Button, Choose File Button, Hotkey Badge
+        btn_f = ctk.CTkFrame(self, fg_color="transparent")
+        btn_f.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(2, 6))
+        btn_f.grid_columnconfigure(1, weight=1)
+
+        self.play_btn = ctk.CTkButton(btn_f, text="▶ Play", width=55, height=26, font=("Segoe UI Semibold", 10),
+                                       fg_color=P["accent"], hover_color=P["accent2"], corner_radius=6,
+                                       command=lambda: on_play_toggle(slot_id, self))
+        self.play_btn.grid(row=0, column=0, padx=(0, 2))
+
+        self.pick_btn = ctk.CTkButton(btn_f, text="📁 File", width=50, height=26, font=("Segoe UI", 10),
+                                       fg_color=P["card"], hover_color=P["hover"], text_color=P["dim"], corner_radius=6,
+                                       command=lambda: on_file_pick(slot_id, self))
+        self.pick_btn.grid(row=0, column=1, sticky="w", padx=2)
+
+        hk_str = get_hotkey(f"soundboard_{slot_id}") or f"ctrl+alt+{slot_id}"
+        self.hk_lbl = ctk.CTkLabel(btn_f, text=f"[{hk_str.upper()}]", font=("Consolas", 9), text_color=P["muted"])
+        self.hk_lbl.grid(row=0, column=2, sticky="e", padx=(2, 0))
+
+    def update_ui(self):
+        fname = os.path.basename(self.slot_obj.file_path) if self.slot_obj.file_path else "No file selected"
+        self.file_lbl.configure(text=fname, text_color=P["dim"] if self.slot_obj.file_path else P["muted"])
+        hk_str = self.get_hotkey(f"soundboard_{self.slot_id}") or f"ctrl+alt+{self.slot_id}"
+        self.hk_lbl.configure(text=f"[{hk_str.upper()}]")
 
 
 class SettingsWindow(ctk.CTkToplevel):
@@ -390,6 +457,19 @@ class App(ctk.CTk):
                 print(f"[UI] Settings load error: {e}")
         self.settings = defaults
 
+        # Load Soundboard slots from settings
+        sb_saved = self.settings.get("soundboard", {})
+        for sid_str, slot_data in sb_saved.items():
+            try:
+                sid = int(sid_str)
+                if 1 <= sid <= 9:
+                    name = slot_data.get("name", f"Sound #{sid}")
+                    file_p = slot_data.get("file", "")
+                    vol = slot_data.get("volume", 1.0)
+                    self.router.soundboard.configure_slot(sid, name=name, file_path=file_p, volume=vol)
+            except Exception as e:
+                print(f"[UI] Soundboard load error for slot {sid_str}: {e}")
+
     def _apply_hotkeys(self):
         try:
             keyboard.unhook_all_hotkeys()
@@ -407,6 +487,8 @@ class App(ctk.CTk):
             "toggle_monitor": lambda: self.after(0, self._toggle_monitor_hotkey_action),
             "scan_apps": lambda: self.after(0, self._scan_apps),
         }
+        for i in range(1, 10):
+            action_callbacks[f"soundboard_{i}"] = (lambda slot_id=i: self.after(0, lambda s=slot_id: self._trigger_soundboard_slot(s)))
 
         hotkeys = self.settings.get("hotkeys", {})
         for act_id, combo in hotkeys.items():
@@ -421,6 +503,11 @@ class App(ctk.CTk):
                     keyboard.add_hotkey(c, cb)
                 except Exception as e:
                     print(f"[UI] Failed to bind hotkey '{c}' for '{act_id}': {e}")
+
+        # Update Soundboard Tile hotkey badges if UI is built
+        if hasattr(self, "sb_tiles") and self.sb_tiles:
+            for tile in self.sb_tiles.values():
+                tile.update_ui()
 
     def _toggle_mics_mute(self):
         self.router.mics_mute = not self.router.mics_mute
@@ -591,46 +678,148 @@ class App(ctk.CTk):
         self._load_devices()
 
     def _left(self, parent):
-        left=ctk.CTkFrame(parent,fg_color=P["card"],corner_radius=14,border_width=1,border_color=P["border"])
-        left.grid(row=0,column=0,sticky="nsew",padx=(0,6))
-        left.grid_columnconfigure(0,weight=1)
-        # Give weight to the scrollable lists so they expand
-        left.grid_rowconfigure(1,weight=3) 
-        left.grid_rowconfigure(3,weight=1)
+        tv = ctk.CTkTabview(parent, fg_color=P["card"], corner_radius=14, border_width=1, border_color=P["border"],
+                            segmented_button_fg_color=P["card2"], segmented_button_selected_fg_color=P["accent"],
+                            segmented_button_selected_hover_color=P["accent2"], text_color=P["txt"])
+        tv.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+
+        tab_sources = tv.add("🎵 Sources")
+        tab_sb = tv.add("📣 Soundboard")
+
+        # ── Tab 1: Sources (Apps + Mics) ──
+        tab_sources.grid_columnconfigure(0, weight=1)
+        tab_sources.grid_rowconfigure(1, weight=3)
+        tab_sources.grid_rowconfigure(3, weight=1)
+
         # Apps section
-        ab=ctk.CTkFrame(left,fg_color="transparent"); ab.grid(row=0,column=0,sticky="ew",padx=14,pady=(14,4))
-        ab.grid_columnconfigure(0,weight=1)
-        ctk.CTkLabel(ab,text="🎵 Applications",font=("Segoe UI Semibold",14),text_color=P["txt"]).grid(row=0,column=0,sticky="w")
+        ab = ctk.CTkFrame(tab_sources, fg_color="transparent")
+        ab.grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 4))
+        ab.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(ab, text="🎵 Applications", font=("Segoe UI Semibold", 14), text_color=P["txt"]).grid(row=0, column=0, sticky="w")
         self.app_mute_btn = ctk.CTkButton(ab, text="🔊", width=32, height=28, font=("Segoe UI", 12),
                                           fg_color=P["card2"], hover_color=P["hover"], text_color=P["dim"],
                                           corner_radius=8, command=self._toggle_apps_mute)
         self.app_mute_btn.grid(row=0, column=1, padx=(4, 4))
-        ctk.CTkButton(ab,text="⟳ Scan",width=70,height=28,font=("Segoe UI",11),fg_color=P["card2"],
-                       hover_color=P["hover"],text_color=P["dim"],corner_radius=8,
-                       command=self._scan_apps).grid(row=0,column=2)
-        # App list
-        self.app_scroll=ctk.CTkScrollableFrame(left,fg_color="transparent",scrollbar_button_color=P["border"])
-        self.app_scroll.grid(row=1,column=0,sticky="nsew",padx=6,pady=(4,4)); self.app_scroll.grid_columnconfigure(0,weight=1)
-        self.app_empty=ctk.CTkLabel(self.app_scroll,text="Click Scan to detect apps with audio",font=("Segoe UI",11),text_color=P["muted"])
-        self.app_empty.grid(row=0,column=0,pady=20)
+        ctk.CTkButton(ab, text="⟳ Scan", width=70, height=28, font=("Segoe UI", 11), fg_color=P["card2"],
+                       hover_color=P["hover"], text_color=P["dim"], corner_radius=8,
+                       command=self._scan_apps).grid(row=0, column=2)
+
+        self.app_scroll = ctk.CTkScrollableFrame(tab_sources, fg_color="transparent", scrollbar_button_color=P["border"])
+        self.app_scroll.grid(row=1, column=0, sticky="nsew", padx=6, pady=(4, 4))
+        self.app_scroll.grid_columnconfigure(0, weight=1)
+        self.app_empty = ctk.CTkLabel(self.app_scroll, text="Click Scan to detect apps with audio", font=("Segoe UI", 11), text_color=P["muted"])
+        self.app_empty.grid(row=0, column=0, pady=20)
+
         # Mic section
-        mb=ctk.CTkFrame(left,fg_color="transparent"); mb.grid(row=2,column=0,sticky="ew",padx=14,pady=(8,4))
-        mb.grid_columnconfigure(1,weight=1)
-        ctk.CTkLabel(mb,text="🎤 Microphones",font=("Segoe UI Semibold",14),text_color=P["txt"]).grid(row=0,column=0,sticky="w")
-        self.mic_var=ctk.StringVar()
-        self.mic_cb=ctk.CTkComboBox(mb,variable=self.mic_var,values=["..."],height=28,font=("Segoe UI",11),
-                                     fg_color=P["card2"],border_color=P["border"],button_color=P["accent"],
-                                     dropdown_fg_color=P["card2"],text_color=P["txt"],corner_radius=8)
-        self.mic_cb.grid(row=0,column=1,padx=(8,4),sticky="ew")
+        mb = ctk.CTkFrame(tab_sources, fg_color="transparent")
+        mb.grid(row=2, column=0, sticky="ew", padx=14, pady=(8, 4))
+        mb.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(mb, text="🎤 Microphones", font=("Segoe UI Semibold", 14), text_color=P["txt"]).grid(row=0, column=0, sticky="w")
+        self.mic_var = ctk.StringVar()
+        self.mic_cb = ctk.CTkComboBox(mb, variable=self.mic_var, values=["..."], height=28, font=("Segoe UI", 11),
+                                      fg_color=P["card2"], border_color=P["border"], button_color=P["accent"],
+                                      dropdown_fg_color=P["card2"], text_color=P["txt"], corner_radius=8)
+        self.mic_cb.grid(row=0, column=1, padx=(8, 4), sticky="ew")
         self.mic_mute_btn = ctk.CTkButton(mb, text="🔊", width=32, height=28, font=("Segoe UI", 12),
                                           fg_color=P["card2"], hover_color=P["hover"], text_color=P["dim"],
                                           corner_radius=8, command=self._toggle_mics_mute)
         self.mic_mute_btn.grid(row=0, column=2, padx=(0, 4))
-        ctk.CTkButton(mb,text="+ Add",width=55,height=28,font=("Segoe UI Semibold",11),fg_color=P["accent"],
-                       hover_color=P["accent2"],corner_radius=8,command=self._add_mic).grid(row=0,column=3)
-        # Mic source list
-        self.mic_scroll=ctk.CTkScrollableFrame(left,fg_color="transparent",scrollbar_button_color=P["border"])
-        self.mic_scroll.grid(row=3,column=0,sticky="nsew",padx=6,pady=(4,8)); self.mic_scroll.grid_columnconfigure(0,weight=1)
+        ctk.CTkButton(mb, text="+ Add", width=55, height=28, font=("Segoe UI Semibold", 11), fg_color=P["accent"],
+                       hover_color=P["accent2"], corner_radius=8, command=self._add_mic).grid(row=0, column=3)
+
+        self.mic_scroll = ctk.CTkScrollableFrame(tab_sources, fg_color="transparent", scrollbar_button_color=P["border"])
+        self.mic_scroll.grid(row=3, column=0, sticky="nsew", padx=6, pady=(4, 8))
+        self.mic_scroll.grid_columnconfigure(0, weight=1)
+
+        # ── Tab 2: Soundboard ──
+        tab_sb.grid_columnconfigure(0, weight=1)
+        tab_sb.grid_rowconfigure(0, weight=1)
+
+        sb_scroll = ctk.CTkScrollableFrame(tab_sb, fg_color="transparent", scrollbar_button_color=P["border"])
+        sb_scroll.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        sb_scroll.grid_columnconfigure((0, 1), weight=1)
+
+        self.sb_tiles = {}
+        for sid in range(1, 10):
+            slot_obj = self.router.soundboard.get_slot(sid)
+            r = (sid - 1) // 2
+            c = (sid - 1) % 2
+            tile = SoundboardTileCard(
+                sb_scroll, slot_id=sid, slot_obj=slot_obj,
+                on_file_pick=self._sb_file_pick,
+                on_play_toggle=self._sb_play_toggle,
+                on_clear=self._sb_clear,
+                on_name_change=self._sb_name_change,
+                get_hotkey=lambda h_id: self.settings.get("hotkeys", {}).get(h_id, "")
+            )
+            tile.grid(row=r, column=c, sticky="nsew", padx=4, pady=4)
+            self.sb_tiles[sid] = tile
+
+    def _sb_file_pick(self, slot_id, tile):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title=f"Select Audio File for Soundboard #{slot_id}",
+            filetypes=[("Audio Files", "*.mp3 *.wav *.flac *.ogg"), ("All Files", "*.*")]
+        )
+        if path:
+            ok = self.router.soundboard.configure_slot(slot_id, name="", file_path=path)
+            if ok:
+                tile.name_entry.delete(0, "end")
+                tile.name_entry.insert(0, self.router.soundboard.get_slot(slot_id).name)
+                tile.update_ui()
+                self._save_soundboard_settings()
+
+    def _sb_play_toggle(self, slot_id, tile):
+        if self.router.soundboard.is_playing(slot_id):
+            self.router.soundboard.stop_slot(slot_id)
+            tile.play_btn.configure(text="▶ Play", fg_color=P["accent"])
+        else:
+            self._trigger_soundboard_slot(slot_id)
+
+    def _sb_clear(self, slot_id, tile):
+        self.router.soundboard.configure_slot(slot_id, name=f"Sound #{slot_id}", file_path="")
+        tile.name_entry.delete(0, "end")
+        tile.name_entry.insert(0, f"Sound #{slot_id}")
+        tile.update_ui()
+        self._save_soundboard_settings()
+
+    def _sb_name_change(self, slot_id, new_name):
+        slot = self.router.soundboard.get_slot(slot_id)
+        if slot:
+            slot.name = new_name or f"Sound #{slot_id}"
+            self._save_soundboard_settings()
+
+    def _trigger_soundboard_slot(self, slot_id):
+        ok = self.router.soundboard.trigger_slot(slot_id)
+        if ok:
+            slot = self.router.soundboard.get_slot(slot_id)
+            if hasattr(self, "foot"):
+                self.foot.configure(text=f"🔊 Playing Soundboard #{slot_id}: {slot.name}")
+            if hasattr(self, "sb_tiles") and slot_id in self.sb_tiles:
+                tile = self.sb_tiles[slot_id]
+                tile.play_btn.configure(text="■ Stop", fg_color=P["red_d"])
+                self.after(200, lambda: self._check_sb_playback(slot_id))
+
+    def _check_sb_playback(self, slot_id):
+        if self.router.soundboard.is_playing(slot_id):
+            self.after(200, lambda: self._check_sb_playback(slot_id))
+        else:
+            if hasattr(self, "sb_tiles") and slot_id in self.sb_tiles:
+                tile = self.sb_tiles[slot_id]
+                tile.play_btn.configure(text="▶ Play", fg_color=P["accent"])
+
+    def _save_soundboard_settings(self):
+        sb_data = {}
+        for sid in range(1, 10):
+            slot = self.router.soundboard.get_slot(sid)
+            if slot:
+                sb_data[str(sid)] = {
+                    "name": slot.name,
+                    "file": slot.file_path,
+                    "volume": slot.volume
+                }
+        self.settings["soundboard"] = sb_data
+        self._save_settings()
 
     def _right(self, parent):
         r=ctk.CTkFrame(parent,fg_color=P["card"],corner_radius=14,border_width=1,border_color=P["border"])

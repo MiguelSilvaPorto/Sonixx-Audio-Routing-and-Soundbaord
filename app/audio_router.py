@@ -3,6 +3,7 @@ import threading, queue, time, os, tempfile
 import numpy as np
 import pyaudiowpatch as pyaudio
 from process_audio_capture import ProcessAudioCapture, AudioProcess, PacCaptureMode
+from app.soundboard import SoundboardManager
 
 CHUNK = 1024
 FMT = pyaudio.paFloat32
@@ -261,6 +262,7 @@ class AudioRouter:
         self.mon_rate = 48000
         self.mics_mute = False
         self.apps_mute = False
+        self.soundboard = SoundboardManager()
 
     # ── Mic sources ──────────────────────────────────────────────────────
     def add_mic(self, dev_info) -> str:
@@ -497,6 +499,16 @@ class AudioRouter:
                     else:
                         ml = min(len(mixed), len(buf))
                         mixed[:ml] += buf[:ml]
+
+        # Add Soundboard audio
+        if hasattr(self, "soundboard") and self.soundboard:
+            sb_buf = self.soundboard.mix_audio(frame_count)
+            if sb_buf is not None:
+                if mixed is None:
+                    mixed = sb_buf.copy()
+                else:
+                    ml = min(len(mixed), len(sb_buf))
+                    mixed[:ml] += sb_buf[:ml]
 
         if mixed is None:
             mixed = np.zeros(frame_count * 2, dtype=np.float32)
