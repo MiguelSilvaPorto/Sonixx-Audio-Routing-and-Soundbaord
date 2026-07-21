@@ -679,7 +679,7 @@ class App(ctk.CTk):
 
     def _left(self, parent):
         tv = ctk.CTkTabview(parent, fg_color=P["card"], corner_radius=14, border_width=1, border_color=P["border"],
-                            segmented_button_fg_color=P["card2"], segmented_button_selected_fg_color=P["accent"],
+                            segmented_button_fg_color=P["card2"], segmented_button_selected_color=P["accent"],
                             segmented_button_selected_hover_color=P["accent2"], text_color=P["txt"])
         tv.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
 
