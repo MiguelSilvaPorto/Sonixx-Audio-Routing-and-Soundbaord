@@ -254,7 +254,11 @@ class AudioRouter:
         self._sid = 0
         self.monitor_enabled = False
         self.monitor_stream = None
-        self.monitor_queue = queue.Queue(maxsize=10)
+        self._mon_byte_buf = bytearray()
+        self._mon_lock = threading.Lock()
+        self.loopback_dev = None
+        self.output_dev = None
+        self.mon_rate = 48000
 
     # ── Mic sources ──────────────────────────────────────────────────────
     def add_mic(self, dev_info) -> str:
@@ -303,10 +307,104 @@ class AudioRouter:
             if pid in self.app_sources:
                 self.app_sources[pid].muted = muted
 
-    # ── Start / Stop ─────────────────────────────────────────────────────
+    # ── Monitor Stream Management ────────────────────────────────────────
+    def start_monitor(self):
+        """Start streaming monitor mix audio to physical headphones/speakers."""
+        self.stop_monitor()
+        if not self.running or not self.output_dev:
+            return False
+
+        with self._mon_lock:
+            self._mon_byte_buf.clear()
+
+        # 1. Try matching the selected loopback device to its physical playback counterpart
+        mon_dev_idx = None
+        mon_dev_name = None
+
+        if self.loopback_dev and "name" in self.loopback_dev:
+            lb_name = self.loopback_dev["name"]
+            clean_name = (lb_name.replace(" [Loopback]", "")
+                                 .replace(" (loopback)", "")
+                                 .replace("[Loopback]", "")
+                                 .replace("(loopback)", "")
+                                 .strip())
+            
+            for i in range(self.pa.get_device_count()):
+                d = self.pa.get_device_info_by_index(i)
+                if d["maxOutputChannels"] > 0:
+                    d_name = d["name"]
+                    if clean_name.lower() in d_name.lower() or d_name.lower() in clean_name.lower():
+                        if "cable" not in d_name.lower() or "cable" in clean_name.lower():
+                            mon_dev_idx = i
+                            mon_dev_name = d_name
+                            break
+
+        # 2. Fallback: check WASAPI default output device (if not VB-Cable)
+        if mon_dev_idx is None:
+            wasapi_idx = -1
+            for i in range(self.pa.get_host_api_count()):
+                if "WASAPI" in self.pa.get_host_api_info_by_index(i)["name"]:
+                    wasapi_idx = i
+                    break
+            if wasapi_idx != -1:
+                api_info = self.pa.get_host_api_info_by_index(wasapi_idx)
+                def_out = api_info["defaultOutputDevice"]
+                if def_out >= 0:
+                    d = self.pa.get_device_info_by_index(def_out)
+                    d_name = d["name"].lower()
+                    if "cable" not in d_name and "sonixx" not in d_name:
+                        mon_dev_idx = def_out
+                        mon_dev_name = d["name"]
+
+        # 3. Fallback: first non-cable WASAPI physical output device
+        if mon_dev_idx is None:
+            for i in range(self.pa.get_device_count()):
+                d = self.pa.get_device_info_by_index(i)
+                if d["maxOutputChannels"] > 0 and "cable" not in d["name"].lower() and "sonixx" not in d["name"].lower():
+                    mon_dev_idx = i
+                    mon_dev_name = d["name"]
+                    break
+
+        if mon_dev_idx is None:
+            print("[Router] No suitable playback device found for Monitor Mix.")
+            return False
+
+        try:
+            mon_info = self.pa.get_device_info_by_index(mon_dev_idx)
+            self.mon_rate = int(mon_info["defaultSampleRate"])
+            out_ch = min(self.output_dev["channels"], 2)
+
+            print(f"[Router] Starting Monitor Mix on '{mon_dev_name}' (idx={mon_dev_idx}, rate={self.mon_rate}Hz)")
+            self.monitor_stream = self.pa.open(
+                format=FMT, channels=out_ch, rate=self.mon_rate, output=True,
+                output_device_index=mon_dev_idx, frames_per_buffer=CHUNK,
+                stream_callback=self._monitor_cb)
+            self.monitor_stream.start_stream()
+            self.monitor_enabled = True
+            return True
+        except Exception as e:
+            print(f"[Router] Monitor start failed on '{mon_dev_name}': {e}")
+            self.monitor_stream = None
+            return False
+
+    def stop_monitor(self):
+        """Stop the monitor mix playback stream."""
+        if self.monitor_stream:
+            try:
+                self.monitor_stream.stop_stream()
+                self.monitor_stream.close()
+            except Exception:
+                pass
+            self.monitor_stream = None
+        with self._mon_lock:
+            self._mon_byte_buf.clear()
+
+    # ── Start / Stop Router ──────────────────────────────────────────────
     def start(self, loopback_dev, output_dev):
         self.stop()
         self.running = True
+        self.loopback_dev = loopback_dev
+        self.output_dev = output_dev
 
         # Start mic sources
         with self._lock:
@@ -342,41 +440,23 @@ class AudioRouter:
             self.running = False
             return False
 
-        # Open monitor stream
+        # Open monitor stream if enabled
         if self.monitor_enabled:
-            # Clear old queue
-            while not self.monitor_queue.empty():
-                try: self.monitor_queue.get_nowait()
-                except: break
-            try:
-                # Find default WASAPI output
-                wasapi_idx = -1
-                for i in range(self.pa.get_host_api_count()):
-                    if "WASAPI" in self.pa.get_host_api_info_by_index(i)["name"]:
-                        wasapi_idx = i
-                        break
-                if wasapi_idx != -1:
-                    api_info = self.pa.get_host_api_info_by_index(wasapi_idx)
-                    def_out = api_info["defaultOutputDevice"]
-                    self.monitor_stream = self.pa.open(
-                        format=FMT, channels=out_ch, rate=output_dev["rate"], output=True,
-                        output_device_index=def_out, frames_per_buffer=CHUNK,
-                        stream_callback=self._monitor_cb)
-                    self.monitor_stream.start_stream()
-            except Exception as e:
-                print(f"[Router] Monitor failed: {e}")
+            self.start_monitor()
 
         return True
 
     def _monitor_cb(self, in_data, frame_count, time_info, status):
-        expected = frame_count * 2 * 4
-        try:
-            data = self.monitor_queue.get_nowait()
-            if len(data) < expected:
-                data += b'\x00' * (expected - len(data))
-            return (data[:expected], pyaudio.paContinue)
-        except queue.Empty:
-            return (b'\x00' * expected, pyaudio.paContinue)
+        needed = frame_count * 2 * 4  # 2 channels, 4 bytes per float32 sample
+        with self._mon_lock:
+            if len(self._mon_byte_buf) >= needed:
+                chunk = bytes(self._mon_byte_buf[:needed])
+                del self._mon_byte_buf[:needed]
+            else:
+                avail = len(self._mon_byte_buf)
+                chunk = bytes(self._mon_byte_buf) + b'\x00' * (needed - avail)
+                self._mon_byte_buf.clear()
+        return (chunk, pyaudio.paContinue)
 
     def _lb_cb(self, in_data, frame_count, time_info, status):
         audio = np.frombuffer(in_data, dtype=np.float32).copy()
@@ -430,20 +510,39 @@ class AudioRouter:
         if len(out_bytes) < expected:
             out_bytes += b'\x00' * (expected - len(out_bytes))
             
-        if self.monitor_enabled:
-            try:
-                self.monitor_queue.put_nowait(out_bytes[:expected])
-            except queue.Full:
-                try:
-                    self.monitor_queue.get_nowait()
-                    self.monitor_queue.put_nowait(out_bytes[:expected])
-                except Exception:
-                    pass
+        if self.monitor_enabled and self.monitor_stream:
+            out_rate = self.output_dev["rate"] if self.output_dev else 48000
+            mon_rate = getattr(self, "mon_rate", out_rate)
+            
+            if mon_rate != out_rate:
+                ratio = mon_rate / out_rate
+                n_in = len(mixed) // 2
+                n_out = int(round(n_in * ratio))
+                if n_in > 0 and n_out > 0:
+                    x_in = np.linspace(0, 1, n_in, endpoint=False)
+                    x_out = np.linspace(0, 1, n_out, endpoint=False)
+                    left_out = np.interp(x_out, x_in, mixed[0::2])
+                    right_out = np.interp(x_out, x_in, mixed[1::2])
+                    mon_mixed = np.empty(n_out * 2, dtype=np.float32)
+                    mon_mixed[0::2] = left_out
+                    mon_mixed[1::2] = right_out
+                    np.clip(mon_mixed, -1.0, 1.0, out=mon_mixed)
+                    mon_bytes = mon_mixed.tobytes()
+                else:
+                    mon_bytes = out_bytes[:expected]
+            else:
+                mon_bytes = out_bytes[:expected]
+
+            with self._mon_lock:
+                if len(self._mon_byte_buf) > 65536:
+                    del self._mon_byte_buf[:32768]
+                self._mon_byte_buf.extend(mon_bytes)
             
         return (out_bytes[:expected], pyaudio.paContinue)
 
     def stop(self):
         self.running = False
+        self.stop_monitor()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
         with self._lock:
@@ -451,7 +550,7 @@ class AudioRouter:
                 s.stop()
             for s in self.app_sources.values():
                 s.stop()
-        for stream in [self.loopback_stream, self.output_stream, self.monitor_stream]:
+        for stream in [self.loopback_stream, self.output_stream]:
             if stream:
                 try:
                     stream.stop_stream()
@@ -460,15 +559,9 @@ class AudioRouter:
                     pass
         self.loopback_stream = None
         self.output_stream = None
-        self.monitor_stream = None
         while not self._q.empty():
             try:
                 self._q.get_nowait()
-            except queue.Empty:
-                break
-        while not self.monitor_queue.empty():
-            try:
-                self.monitor_queue.get_nowait()
             except queue.Empty:
                 break
         self.mix_peak = 0.0
@@ -478,3 +571,4 @@ class AudioRouter:
         with self._lock:
             self.mic_sources.clear()
             self.app_sources.clear()
+

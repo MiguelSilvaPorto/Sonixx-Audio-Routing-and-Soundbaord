@@ -391,9 +391,10 @@ class App(ctk.CTk):
     def _toggle_monitor(self):
         self.router.monitor_enabled = bool(self.monitor_switch.get())
         if self.router.running:
-            # Requires restart to apply WASAPI stream
-            self._stop()
-            self._start()
+            if self.router.monitor_enabled:
+                self.router.start_monitor()
+            else:
+                self.router.stop_monitor()
 
     def _load_devices(self):
         self._mics={}; self._loops={}
