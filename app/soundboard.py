@@ -75,6 +75,8 @@ class SoundboardManager:
         self.slots: dict[int, SoundSlot] = {i: SoundSlot(i) for i in range(1, 10)}
         self.playbacks = []  # list of dicts: {"slot_id": i, "buffer": arr, "cursor": int, "volume": float}
         self.lock = threading.Lock()
+        self.master_vol = 1.0
+        self.muted = False
 
     def get_slot(self, slot_id: int) -> SoundSlot:
         return self.slots.get(slot_id)
@@ -134,6 +136,9 @@ class SoundboardManager:
 
     def mix_audio(self, frame_count: int) -> np.ndarray | None:
         """Mix active soundboard playbacks for frame_count frames. Returns stereo Float32 NumPy array or None."""
+        if self.muted:
+            return None
+
         with self.lock:
             if not self.playbacks:
                 return None
@@ -162,5 +167,8 @@ class SoundboardManager:
         if finished_slots:
             with self.lock:
                 self.playbacks = [p for p in self.playbacks if p["slot_id"] not in finished_slots]
+
+        if self.master_vol != 1.0:
+            mixed *= self.master_vol
 
         return mixed

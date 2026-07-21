@@ -86,6 +86,7 @@ DEFAULT_HOTKEYS = {
     "mute_master": {"label": "Toggle Master Mute", "default": "ctrl+alt+m"},
     "mute_mics": {"label": "Toggle Mute Microphones", "default": "ctrl+alt+n"},
     "mute_apps": {"label": "Toggle Mute Applications", "default": "ctrl+alt+a"},
+    "mute_soundboard": {"label": "Toggle Mute Soundboard", "default": "ctrl+alt+q"},
     "toggle_router": {"label": "Toggle Audio Router", "default": "ctrl+alt+s"},
     "toggle_monitor": {"label": "Toggle Monitor Mix", "default": "ctrl+alt+o"},
     "scan_apps": {"label": "Scan Audio Apps", "default": "ctrl+alt+r"},
@@ -467,7 +468,12 @@ class App(ctk.CTk):
                 print(f"[UI] Settings load error: {e}")
         self.settings = defaults
 
-        # Load Soundboard slots from settings
+        # Load Soundboard slots & master volume from settings
+        sb_vol = self.settings.get("soundboard_vol", 1.0)
+        sb_muted = self.settings.get("soundboard_muted", False)
+        self.router.soundboard.master_vol = float(sb_vol)
+        self.router.soundboard.muted = bool(sb_muted)
+
         sb_saved = self.settings.get("soundboard", {})
         for sid_str, slot_data in sb_saved.items():
             try:
@@ -493,6 +499,7 @@ class App(ctk.CTk):
             "mute_master": lambda: self.after(0, self._mute),
             "mute_mics": lambda: self.after(0, self._toggle_mics_mute),
             "mute_apps": lambda: self.after(0, self._toggle_apps_mute),
+            "mute_soundboard": lambda: self.after(0, self._toggle_soundboard_mute),
             "toggle_router": lambda: self.after(0, self._toggle_router_hotkey),
             "toggle_monitor": lambda: self.after(0, self._toggle_monitor_hotkey_action),
             "scan_apps": lambda: self.after(0, self._scan_apps),
@@ -540,6 +547,27 @@ class App(ctk.CTk):
                 self.app_mute_btn.configure(text="🔊", fg_color=P["card2"], text_color=P["dim"])
         if hasattr(self, "foot"):
             self.foot.configure(text=f"Applications {state_str}")
+
+    def _toggle_soundboard_mute(self):
+        self.router.soundboard.muted = not self.router.soundboard.muted
+        self.settings["soundboard_muted"] = self.router.soundboard.muted
+        self._save_settings()
+        state_str = "MUTED" if self.router.soundboard.muted else "ACTIVE"
+        if hasattr(self, "sb_mute_btn"):
+            if self.router.soundboard.muted:
+                self.sb_mute_btn.configure(text="🔇", fg_color=P["red_d"], text_color=P["red"])
+            else:
+                self.sb_mute_btn.configure(text="🔊", fg_color=P["card2"], text_color=P["dim"])
+        if hasattr(self, "foot"):
+            self.foot.configure(text=f"Soundboard {state_str}")
+
+    def _on_soundboard_vol_change(self, val):
+        vol = float(val)
+        self.router.soundboard.master_vol = vol
+        self.settings["soundboard_vol"] = vol
+        self._save_settings()
+        if hasattr(self, "sb_vol_lbl"):
+            self.sb_vol_lbl.configure(text=f"{int(vol * 100)}%")
 
     def _toggle_router_hotkey(self):
         if self._running:
@@ -743,10 +771,35 @@ class App(ctk.CTk):
 
         # ── Tab 2: Soundboard ──
         tab_sb.grid_columnconfigure(0, weight=1)
-        tab_sb.grid_rowconfigure(0, weight=1)
+        tab_sb.grid_rowconfigure(1, weight=1)
+
+        # Header for Soundboard (Unified Volume + Mute Button)
+        sb_hdr = ctk.CTkFrame(tab_sb, fg_color="transparent")
+        sb_hdr.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        sb_hdr.grid_columnconfigure(2, weight=1)
+
+        ctk.CTkLabel(sb_hdr, text="📣 Soundboard", font=("Segoe UI Semibold", 14), text_color=P["txt"]).grid(row=0, column=0, sticky="w", padx=(0, 8))
+
+        is_sb_muted = self.router.soundboard.muted
+        self.sb_mute_btn = ctk.CTkButton(sb_hdr, text="🔇" if is_sb_muted else "🔊", width=32, height=28, font=("Segoe UI", 12),
+                                          fg_color=P["red_d"] if is_sb_muted else P["card2"],
+                                          hover_color=P["hover"], text_color=P["red"] if is_sb_muted else P["dim"],
+                                          corner_radius=8, command=self._toggle_soundboard_mute)
+        self.sb_mute_btn.grid(row=0, column=1, padx=(0, 8))
+
+        # Unified Soundboard Master Volume Slider
+        sb_vol = self.router.soundboard.master_vol
+        self.sb_vol_slider = ctk.CTkSlider(sb_hdr, from_=0.0, to=2.0, number_of_steps=100, height=14,
+                                           progress_color=P["accent"], button_color="#fff", button_hover_color=P["accent2"],
+                                           command=self._on_soundboard_vol_change)
+        self.sb_vol_slider.set(sb_vol)
+        self.sb_vol_slider.grid(row=0, column=2, sticky="ew", padx=(0, 4))
+
+        self.sb_vol_lbl = ctk.CTkLabel(sb_hdr, text=f"{int(sb_vol * 100)}%", font=("Consolas", 10), text_color=P["dim"], width=35)
+        self.sb_vol_lbl.grid(row=0, column=3, sticky="e")
 
         sb_scroll = ctk.CTkScrollableFrame(tab_sb, fg_color="transparent", scrollbar_button_color=P["border"])
-        sb_scroll.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        sb_scroll.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
         sb_scroll.grid_columnconfigure((0, 1), weight=1)
 
         self.sb_tiles = {}
