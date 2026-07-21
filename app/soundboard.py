@@ -3,7 +3,8 @@ import os, shutil, threading
 import numpy as np
 import miniaudio
 
-SOUNDS_DIR = os.path.join(os.path.expanduser("~"), ".sonixx", "sounds")
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SOUNDS_DIR = os.path.join(APP_DIR, "sounds")
 os.makedirs(SOUNDS_DIR, exist_ok=True)
 
 

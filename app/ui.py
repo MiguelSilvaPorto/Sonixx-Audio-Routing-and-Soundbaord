@@ -114,28 +114,32 @@ class SoundboardTileCard(ctk.CTkFrame):
 
         self.grid_columnconfigure(1, weight=1)
 
-        # Header Row: Badge (#1), Name Entry, Clear Button
-        ctk.CTkLabel(self, text=f"#{slot_id}", font=("Segoe UI Black", 12), text_color=P["accent2"]).grid(row=0, column=0, padx=(8, 4), pady=4)
+        # Header Row: Badge (#1), Name Entry, Save Button (✓), Clear Button (✕)
+        ctk.CTkLabel(self, text=f"#{slot_id}", font=("Segoe UI Black", 12), text_color=P["accent2"]).grid(row=0, column=0, padx=(8, 2), pady=4)
         
         self.name_entry = ctk.CTkEntry(self, height=24, font=("Segoe UI Semibold", 11),
                                        fg_color=P["card"], border_color=P["border"], text_color=P["txt"], corner_radius=6)
         self.name_entry.insert(0, slot_obj.name)
         self.name_entry.grid(row=0, column=1, sticky="ew", padx=2, pady=4)
-        self.name_entry.bind("<FocusOut>", lambda e: on_name_change(slot_id, self.name_entry.get()))
-        self.name_entry.bind("<Return>", lambda e: on_name_change(slot_id, self.name_entry.get()))
+        self.name_entry.bind("<Return>", lambda e: self.save_name())
+
+        self.save_btn = ctk.CTkButton(self, text="✓", width=22, height=22, font=("Segoe UI Bold", 11),
+                                      fg_color="transparent", hover_color=P["hover"], text_color=P["dim"],
+                                      corner_radius=4, command=self.save_name)
+        self.save_btn.grid(row=0, column=2, padx=1)
 
         ctk.CTkButton(self, text="✕", width=22, height=22, font=("Segoe UI", 10),
                        fg_color="transparent", hover_color=P["red_d"], text_color=P["muted"],
-                       corner_radius=4, command=lambda: on_clear(slot_id, self)).grid(row=0, column=2, padx=(2, 6))
+                       corner_radius=4, command=lambda: on_clear(slot_id, self)).grid(row=0, column=3, padx=(1, 4))
 
         # File Status Label
         fname = os.path.basename(slot_obj.file_path) if slot_obj.file_path else "No file selected"
         self.file_lbl = ctk.CTkLabel(self, text=fname, font=("Segoe UI", 9), text_color=P["dim"] if slot_obj.file_path else P["muted"], anchor="w")
-        self.file_lbl.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 2))
+        self.file_lbl.grid(row=1, column=0, columnspan=4, sticky="ew", padx=8, pady=(0, 2))
 
         # Bottom Row: Play Button, Choose File Button, Hotkey Badge
         btn_f = ctk.CTkFrame(self, fg_color="transparent")
-        btn_f.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(2, 6))
+        btn_f.grid(row=2, column=0, columnspan=4, sticky="ew", padx=6, pady=(2, 6))
         btn_f.grid_columnconfigure(1, weight=1)
 
         self.play_btn = ctk.CTkButton(btn_f, text="▶ Play", width=55, height=26, font=("Segoe UI Semibold", 10),
@@ -151,6 +155,12 @@ class SoundboardTileCard(ctk.CTkFrame):
         hk_str = get_hotkey(f"soundboard_{slot_id}") or f"ctrl+alt+{slot_id}"
         self.hk_lbl = ctk.CTkLabel(btn_f, text=f"[{hk_str.upper()}]", font=("Consolas", 9), text_color=P["muted"])
         self.hk_lbl.grid(row=0, column=2, sticky="e", padx=(2, 0))
+
+    def save_name(self):
+        new_name = self.name_entry.get()
+        self.on_name_change(self.slot_id, new_name)
+        self.save_btn.configure(text="✓", fg_color=P["green_d"], text_color=P["green"])
+        self.after(1200, lambda: self.save_btn.configure(text="✓", fg_color="transparent", text_color=P["dim"]))
 
     def update_ui(self):
         fname = os.path.basename(self.slot_obj.file_path) if self.slot_obj.file_path else "No file selected"
@@ -417,11 +427,11 @@ class App(ctk.CTk):
         # Load logo for header
         try:
             self.logo_img = ctk.CTkImage(Image.open(resource_path("assets/sonixx_logo.png")), size=(24, 24))
-        except:
+        except Exception:
             self.logo_img = None
-        self._load_settings()
         self.pa = pyaudio.PyAudio(); self.wi = find_wasapi(self.pa)
         self.router = AudioRouter(self.pa)
+        self._load_settings()
         self.mic_rows={}; self.app_rows={}
         self._running=False; self._peak_job=None
         self._settings_win = None
