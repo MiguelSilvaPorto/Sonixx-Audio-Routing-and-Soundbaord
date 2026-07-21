@@ -27,7 +27,11 @@ def main():
             ctypes.windll.user32.MessageBoxW(0, f"Sonixx encountered a startup error:\n\n{e}", "Sonixx Startup Error", 0x10)
         except Exception:
             pass
-        input("Press Enter to exit...")
+        try:
+            if sys.stdin and hasattr(sys.stdin, "read"):
+                input("Press Enter to exit...")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
