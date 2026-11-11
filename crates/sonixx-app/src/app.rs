@@ -47,6 +47,8 @@ pub struct SonixxApp {
 impl SonixxApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::configure(&cc.egui_ctx);
+        cc.egui_ctx
+            .send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
         let settings = Settings::load();
         let master_volume = settings.master_volume.clamp(0.0, 2.0);
         let monitor = settings.monitor;
@@ -188,6 +190,49 @@ impl eframe::App for SonixxApp {
             } else {
                 "Parado.".to_string()
             };
+        }
+
+        let mut play = None;
+        let mut open_folder = false;
+        let status = self.status.clone();
+
+        egui::Panel::bottom("soundboard")
+            .exact_size(96.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(PANEL)
+                    .stroke(egui::Stroke::new(1.0, BORDER))
+                    .inner_margin(egui::Margin::symmetric(18, 12)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("SOUNDBOARD").size(11.0).strong().color(MUTED));
+                    for name in ["Airhorn", "Aplausos", "Risada", "Tambor"] {
+                        if ui
+                            .add_sized([96.0, 30.0], egui::Button::new(name))
+                            .clicked()
+                        {
+                            play = Some(name);
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_sized([150.0, 30.0], egui::Button::new("Abrir pasta de sons"))
+                            .clicked()
+                        {
+                            open_folder = true;
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                ui.label(RichText::new(status).size(11.0).color(MUTED));
+            });
+
+        if let Some(name) = play {
+            self.status = format!("Tocando: {name} (engine de áudio na próxima fase).");
+        }
+        if open_folder {
+            self.status = format!("Pasta de sons: {}", "sounds/");
         }
 
         let mut master_volume = self.master_volume;
@@ -408,49 +453,6 @@ impl eframe::App for SonixxApp {
         }
         if let Some(index) = remove_mic {
             self.mics.remove(index);
-        }
-
-        let mut play = None;
-        let mut open_folder = false;
-        let status = self.status.clone();
-
-        egui::Panel::bottom("soundboard")
-            .exact_size(96.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(PANEL)
-                    .stroke(egui::Stroke::new(1.0, BORDER))
-                    .inner_margin(egui::Margin::symmetric(18, 12)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("SOUNDBOARD").size(11.0).strong().color(MUTED));
-                    for name in ["Airhorn", "Aplausos", "Risada", "Tambor"] {
-                        if ui
-                            .add_sized([96.0, 30.0], egui::Button::new(name))
-                            .clicked()
-                        {
-                            play = Some(name);
-                        }
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_sized([150.0, 30.0], egui::Button::new("Abrir pasta de sons"))
-                            .clicked()
-                        {
-                            open_folder = true;
-                        }
-                    });
-                });
-                ui.add_space(6.0);
-                ui.label(RichText::new(status).size(11.0).color(MUTED));
-            });
-
-        if let Some(name) = play {
-            self.status = format!("Tocando: {name} (engine de áudio na próxima fase).");
-        }
-        if open_folder {
-            self.status = format!("Pasta de sons: {}", "sounds/");
         }
     }
 }
