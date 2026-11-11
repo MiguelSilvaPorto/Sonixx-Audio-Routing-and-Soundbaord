@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["tools/devtool"]
+members = [
+    "crates/sonixx-core",
+    "crates/sonixx-app",
+    "tools/devtool",
+]
 
 [workspace.package]
 version = "0.1.0"

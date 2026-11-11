@@ -1,0 +1,15 @@
+[package]
+name = "sonixx-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native Rust desktop app for Sonixx."
+
+[[bin]]
+name = "sonixx"
+path = "src/main.rs"
+
+[dependencies]
+sonixx-core = { path = "../sonixx-core" }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "clipboard", "system_fonts"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
