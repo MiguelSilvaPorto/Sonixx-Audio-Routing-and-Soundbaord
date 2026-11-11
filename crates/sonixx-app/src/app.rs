@@ -18,20 +18,6 @@ struct Source {
     phase: f32,
 }
 
-impl Source {
-    fn new(name: impl Into<String>, detail: impl Into<String>, volume: f32, phase: f32) -> Self {
-        Self {
-            name: name.into(),
-            detail: detail.into(),
-            volume,
-            active: true,
-            muted: false,
-            peak: 0.0,
-            phase,
-        }
-    }
-}
-
 pub struct SonixxApp {
     running: bool,
     master_volume: f32,
@@ -58,19 +44,11 @@ impl SonixxApp {
             master_muted: false,
             monitor,
             tab: Tab::Apps,
-            apps: vec![
-                Source::new("Google Chrome", "Janela: YouTube", 0.82, 1.1),
-                Source::new("Spotify", "Reproduzindo música", 0.68, 2.7),
-                Source::new("Discord", "Chamada de voz", 0.55, 4.2),
-            ],
-            mics: vec![Source::new(
-                "Headset Microfone",
-                "WASAPI · 48 kHz",
-                1.0,
-                0.4,
-            )],
+            apps: Vec::new(),
+            mics: Vec::new(),
             settings,
-            status: "Interface Rust pronta. Engine de áudio na próxima fase.".to_string(),
+            status: "Nenhuma fonte carregada. Detecção e áudio reais entram na fase 2 (WASAPI)."
+                .to_string(),
         }
     }
 
@@ -197,7 +175,7 @@ impl eframe::App for SonixxApp {
         let status = self.status.clone();
 
         egui::Panel::bottom("soundboard")
-            .exact_size(96.0)
+            .exact_size(116.0)
             .frame(
                 egui::Frame::new()
                     .fill(PANEL)
@@ -358,8 +336,6 @@ impl eframe::App for SonixxApp {
 
         let running = self.running;
         let mut tab = self.tab;
-        let mut add_app = false;
-        let mut add_mic = false;
         let mut remove_app = None;
         let mut remove_mic = None;
 
@@ -373,18 +349,22 @@ impl eframe::App for SonixxApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Fontes de áudio").size(20.0).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_sized([156.0, 30.0], egui::Button::new("+ Adicionar microfone"))
-                            .clicked()
-                        {
-                            add_mic = true;
-                        }
-                        if ui
-                            .add_sized([140.0, 30.0], egui::Button::new("+ Adicionar app"))
-                            .clicked()
-                        {
-                            add_app = true;
-                        }
+                        ui.add_enabled(
+                            false,
+                            egui::Button::new("+ Adicionar microfone")
+                                .min_size(egui::vec2(156.0, 30.0)),
+                        )
+                        .on_disabled_hover_text(
+                            "A enumeração real de microfones entra na fase 2 (WASAPI).",
+                        );
+                        ui.add_enabled(
+                            false,
+                            egui::Button::new("+ Adicionar app")
+                                .min_size(egui::vec2(140.0, 30.0)),
+                        )
+                        .on_disabled_hover_text(
+                            "A detecção real de aplicativos entra na fase 3 (WASAPI).",
+                        );
                     });
                 });
 
@@ -408,7 +388,10 @@ impl eframe::App for SonixxApp {
                     .show(ui, |ui| match tab {
                         Tab::Apps => {
                             if self.apps.is_empty() {
-                                empty_state(ui, "Nenhum aplicativo na mixagem.");
+                                empty_state(
+                                    ui,
+                                    "Nenhum aplicativo detectado.\nA captura por processo entra na fase 3 (WASAPI).",
+                                );
                             }
                             for (index, source) in self.apps.iter_mut().enumerate() {
                                 if source_card(ui, source, running) {
@@ -418,7 +401,10 @@ impl eframe::App for SonixxApp {
                         }
                         Tab::Mics => {
                             if self.mics.is_empty() {
-                                empty_state(ui, "Nenhum microfone na mixagem.");
+                                empty_state(
+                                    ui,
+                                    "Nenhum microfone detectado.\nA enumeração real de dispositivos entra na fase 2 (WASAPI).",
+                                );
                             }
                             for (index, source) in self.mics.iter_mut().enumerate() {
                                 if source_card(ui, source, running) {
@@ -430,24 +416,6 @@ impl eframe::App for SonixxApp {
             });
 
         self.tab = tab;
-        if add_app {
-            let index = self.apps.len() + 1;
-            self.apps.push(Source::new(
-                format!("Aplicativo {index}"),
-                "Detectado na próxima varredura",
-                0.7,
-                index as f32,
-            ));
-        }
-        if add_mic {
-            let index = self.mics.len() + 1;
-            self.mics.push(Source::new(
-                format!("Microfone {index}"),
-                "WASAPI · 48 kHz",
-                1.0,
-                index as f32,
-            ));
-        }
         if let Some(index) = remove_app {
             self.apps.remove(index);
         }
