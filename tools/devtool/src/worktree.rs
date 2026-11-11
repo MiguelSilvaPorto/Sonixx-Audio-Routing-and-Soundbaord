@@ -485,7 +485,13 @@ pub fn clean(
         );
     }
 
-    let branch = resolve_branch_for_path(&git, &dest)?;
+    let branch = resolve_branch_for_path(&git, &dest)?.or_else(|| {
+        if name.contains('/') {
+            Some(name.to_string())
+        } else {
+            None
+        }
+    });
     let attempts = if wait { 60 } else { 1 };
     let dest_text = dest.to_string_lossy().to_string();
     let mut last_error = String::new();
@@ -502,11 +508,30 @@ pub fn clean(
             println!("Worktree removed: {}", dest.display());
             if delete_branch {
                 if let Some(branch) = branch.as_deref() {
-                    let (deleted, _, delete_err) = git.allow_fail(&["branch", "-D", branch])?;
+                    let mut deleted = false;
+                    let mut last_error = String::new();
+                    for attempt in 1..=10 {
+                        let (ok, _, err) = git.allow_fail(&["branch", "-D", branch])?;
+                        if ok {
+                            deleted = true;
+                            break;
+                        }
+                        last_error = err;
+                        if attempt < 10 {
+                            sleep(Duration::from_millis(300));
+                        }
+                    }
                     if deleted {
                         println!("Local branch deleted: {branch}");
+                        log_cleanup(&principal, &format!("OK {branch}: local branch deleted"));
                     } else {
-                        println!("Could not delete local branch '{branch}': {delete_err}");
+                        println!("Could not delete local branch '{branch}': {last_error}");
+                        log_cleanup(
+                            &principal,
+                            &format!(
+                                "PENDING {branch}: could not delete local branch - {last_error}"
+                            ),
+                        );
                     }
                 }
             }
