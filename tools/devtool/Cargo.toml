@@ -1,0 +1,15 @@
+[package]
+name = "sonixx-dev"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Development workflow CLI for Sonixx: worktrees, protected branches and cleanup."
+publish = false
+
+[[bin]]
+name = "sonixx-dev"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }

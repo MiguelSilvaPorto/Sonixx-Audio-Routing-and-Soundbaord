@@ -1,4 +1,4 @@
-# Python-generated files
+# Python-generated files (legacy - removed when the Rust rewrite lands)
 __pycache__/
 *.py[oc]
 build/
@@ -7,7 +7,7 @@ wheels/
 *.egg-info
 
 # Built EXE
-.exe
+*.exe
 
 # Virtual environments
 .venv
@@ -15,3 +15,18 @@ wheels/
 # Soundboard user files
 sounds/*
 !sounds/.gitkeep
+
+# Rust
+target/
+
+# Task worktrees (the AI works here, never in the main copy)
+.worktrees/
+
+# Graphify local graph
+graphify-out/
+.graphify/
+
+# Local secrets
+.env
+.env.*
+!.env.example
