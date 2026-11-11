@@ -3,6 +3,12 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MicSelection {
+    pub id: String,
+    pub name: String,
+}
+
 /// User settings, persisted in `%APPDATA%\Sonixx\settings.json` on Windows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -12,6 +18,11 @@ pub struct Settings {
     pub theme: String,
     pub master_volume: f32,
     pub monitor: bool,
+    pub output_device: Option<String>,
+    pub loopback_device: Option<String>,
+    pub output_name: String,
+    pub loopback_name: String,
+    pub mics: Vec<MicSelection>,
 }
 
 impl Default for Settings {
@@ -22,6 +33,11 @@ impl Default for Settings {
             theme: "dark".to_string(),
             master_volume: 1.0,
             monitor: false,
+            output_device: None,
+            loopback_device: None,
+            output_name: String::new(),
+            loopback_name: String::new(),
+            mics: Vec::new(),
         }
     }
 }
@@ -63,6 +79,7 @@ mod tests {
         assert!(!settings.startup);
         assert_eq!(settings.theme, "dark");
         assert_eq!(settings.master_volume, 1.0);
+        assert!(settings.mics.is_empty());
     }
 
     #[test]
@@ -73,11 +90,21 @@ mod tests {
             theme: "dark".to_string(),
             master_volume: 1.4,
             monitor: true,
+            output_device: Some("out".to_string()),
+            loopback_device: Some("loop".to_string()),
+            output_name: "CABLE Input".to_string(),
+            loopback_name: "Headphones".to_string(),
+            mics: vec![super::MicSelection {
+                id: "mic".to_string(),
+                name: "Microphone".to_string(),
+            }],
         };
         let text = serde_json::to_string(&settings).expect("serialize");
         let parsed: Settings = serde_json::from_str(&text).expect("deserialize");
         assert_eq!(parsed.master_volume, 1.4);
         assert!(parsed.monitor);
         assert!(parsed.startup);
+        assert_eq!(parsed.mics.len(), 1);
+        assert_eq!(parsed.output_name, "CABLE Input");
     }
 }

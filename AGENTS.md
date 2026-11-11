@@ -12,14 +12,10 @@ Transformar o **Sonixx** em um aplicativo **100% Rust** para Windows 10/11 —
 engine de áudio e interface — sem Python em runtime, sem webview e sem DLL de
 captura de terceiros.
 
-Até a paridade com a versão atual:
-
-- `main.py` e `app/` são **referência funcional** do comportamento existente;
-- **nenhuma feature nova entra em Python**;
-- toda implementação nova nasce em Rust, dentro de uma worktree.
-
-O destino é simples: o repositório não terá Python, `requirements.txt`, `uv.lock`
-nem PyInstaller no produto final.
+O Python foi removido do repositório: não há mais `main.py`, `app/`,
+`requirements.txt`, `uv.lock` nem PyInstaller. Toda implementação nova nasce em
+Rust, dentro de uma worktree. A paridade funcional é acompanhada em
+[`docs/RUST-PLAN.md`](docs/RUST-PLAN.md).
 
 ---
 

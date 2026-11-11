@@ -1,33 +1,30 @@
 use crate::theme::{self, *};
 use eframe::egui::{self, Color32, RichText};
-use sonixx_core::{Settings, APP_VERSION};
+use sonixx_core::audio::{
+    default_device, list_devices, AudioDevice, DeviceFlow, Engine, EngineConfig, SourceControl,
+    SourceKind,
+};
+use sonixx_core::{MicSelection, Settings, APP_VERSION};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
-    Apps,
+    System,
     Mics,
 }
 
-struct Source {
-    name: String,
-    detail: String,
-    volume: f32,
-    active: bool,
-    muted: bool,
-    peak: f32,
-    phase: f32,
-}
-
 pub struct SonixxApp {
-    running: bool,
-    master_volume: f32,
-    master_muted: bool,
-    monitor: bool,
+    engine: Engine,
+    outputs: Vec<AudioDevice>,
+    inputs: Vec<AudioDevice>,
+    output_id: String,
+    loopback_id: String,
+    mic_choice: String,
+    mics: Vec<AudioDevice>,
     tab: Tab,
-    apps: Vec<Source>,
-    mics: Vec<Source>,
-    settings: Settings,
     status: String,
+    settings: Settings,
+    vb_cable_installed: bool,
+    monitor: bool,
 }
 
 impl SonixxApp {
@@ -35,53 +32,159 @@ impl SonixxApp {
         theme::configure(&cc.egui_ctx);
         cc.egui_ctx
             .send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+
         let settings = Settings::load();
-        let master_volume = settings.master_volume.clamp(0.0, 2.0);
-        let monitor = settings.monitor;
-        Self {
-            running: false,
-            master_volume,
-            master_muted: false,
-            monitor,
-            tab: Tab::Apps,
-            apps: Vec::new(),
+        let engine = Engine::new();
+        engine.set_master_volume(settings.master_volume.clamp(0.0, 2.0));
+
+        let mut app = Self {
+            engine,
+            outputs: Vec::new(),
+            inputs: Vec::new(),
+            output_id: settings.output_device.clone().unwrap_or_default(),
+            loopback_id: settings.loopback_device.clone().unwrap_or_default(),
+            mic_choice: String::new(),
             mics: Vec::new(),
-            settings,
-            status: "Nenhuma fonte carregada. Detecção e áudio reais entram na fase 2 (WASAPI)."
-                .to_string(),
+            tab: Tab::System,
+            status: "Selecione a saída e a fonte de áudio do sistema.".to_string(),
+            monitor: settings.monitor,
+            settings: settings.clone(),
+            vb_cable_installed: false,
+        };
+        app.reload_devices();
+
+        if !settings.mics.is_empty() {
+            app.mics = settings
+                .mics
+                .iter()
+                .filter_map(|saved| {
+                    app.inputs
+                        .iter()
+                        .find(|device| device.id == saved.id)
+                        .cloned()
+                })
+                .collect();
+        } else if let Ok(default) = default_device(DeviceFlow::Capture) {
+            app.mics.push(default);
         }
+        if !app.inputs.iter().any(|device| device.id == app.mic_choice) {
+            app.mic_choice = app
+                .mics
+                .first()
+                .map(|device| device.id.clone())
+                .or_else(|| app.inputs.first().map(|device| device.id.clone()))
+                .unwrap_or_default();
+        }
+        app
     }
 
-    fn animate(&mut self, ctx: &egui::Context) {
-        let time = ctx.input(|input| input.time) as f32;
-        let running = self.running;
-        for source in self.apps.iter_mut().chain(self.mics.iter_mut()) {
-            if running && source.active && !source.muted {
-                source.peak = 0.22 + 0.62 * ((time * 1.8 + source.phase).sin().abs());
-            } else {
-                source.peak *= 0.82;
+    fn reload_devices(&mut self) {
+        self.outputs = list_devices(DeviceFlow::Render).unwrap_or_default();
+        self.inputs = list_devices(DeviceFlow::Capture).unwrap_or_default();
+        self.vb_cable_installed = self
+            .outputs
+            .iter()
+            .any(|device| device.name.to_lowercase().contains("cable input"));
+
+        let default_out = default_device(DeviceFlow::Render).ok();
+        let default_in = default_device(DeviceFlow::Capture).ok();
+        let cable = self
+            .outputs
+            .iter()
+            .find(|device| device.name.to_lowercase().contains("cable input"))
+            .cloned();
+
+        if !self
+            .outputs
+            .iter()
+            .any(|device| device.id == self.output_id)
+        {
+            self.output_id = cable
+                .map(|device| device.id)
+                .or_else(|| default_out.as_ref().map(|device| device.id.clone()))
+                .or_else(|| self.outputs.first().map(|device| device.id.clone()))
+                .unwrap_or_default();
+        }
+        if !self
+            .outputs
+            .iter()
+            .any(|device| device.id == self.loopback_id)
+        {
+            self.loopback_id = default_out
+                .as_ref()
+                .map(|device| device.id.clone())
+                .or_else(|| self.outputs.first().map(|device| device.id.clone()))
+                .unwrap_or_default();
+        }
+        if !self
+            .inputs
+            .iter()
+            .any(|device| device.id == self.mic_choice)
+        {
+            self.mic_choice = default_in
+                .as_ref()
+                .map(|device| device.id.clone())
+                .or_else(|| self.inputs.first().map(|device| device.id.clone()))
+                .unwrap_or_default();
+        }
+        self.mics
+            .retain(|mic| self.inputs.iter().any(|device| device.id == mic.id));
+    }
+
+    fn start_engine(&mut self) {
+        if self.engine.is_running() {
+            self.engine.stop();
+        }
+        let output = self
+            .outputs
+            .iter()
+            .find(|device| device.id == self.output_id)
+            .cloned();
+        let loopback = self
+            .outputs
+            .iter()
+            .find(|device| device.id == self.loopback_id)
+            .cloned();
+        match (output, loopback) {
+            (Some(output_device), Some(loopback_device)) => {
+                let config = EngineConfig {
+                    output_device,
+                    loopback_device,
+                    mic_devices: self.mics.clone(),
+                    master_volume: self.engine.master_volume(),
+                    master_muted: self.engine.master_muted(),
+                };
+                match self.engine.start(config) {
+                    Ok(()) => {
+                        self.status = "Roteando. Os medidores mostram o áudio real.".to_string();
+                    }
+                    Err(error) => {
+                        self.status = format!("Falha ao iniciar: {error:#}");
+                    }
+                }
+            }
+            _ => {
+                self.status = "Selecione um dispositivo de saída e uma fonte de áudio do sistema."
+                    .to_string();
             }
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
-    }
-
-    fn master_peak(&self) -> f32 {
-        if self.master_muted {
-            return 0.0;
-        }
-        let peak = self
-            .apps
-            .iter()
-            .chain(self.mics.iter())
-            .filter(|source| source.active && !source.muted)
-            .map(|source| source.peak)
-            .fold(0.0, f32::max);
-        (peak * self.master_volume).clamp(0.0, 1.0)
     }
 
     fn save_settings(&mut self) {
-        self.settings.master_volume = self.master_volume;
+        self.settings.master_volume = self.engine.master_volume();
+        self.settings.output_device = Some(self.output_id.clone());
+        self.settings.loopback_device = Some(self.loopback_id.clone());
+        self.settings.output_name = device_name(&self.outputs, &self.output_id);
+        self.settings.loopback_name = device_name(&self.outputs, &self.loopback_id);
         self.settings.monitor = self.monitor;
+        self.settings.mics = self
+            .mics
+            .iter()
+            .map(|device| MicSelection {
+                id: device.id.clone(),
+                name: device.name.clone(),
+            })
+            .collect();
         self.status = match self.settings.save() {
             Ok(()) => format!("Configurações salvas em {}", Settings::path().display()),
             Err(error) => format!("Falha ao salvar configurações: {error}"),
@@ -91,9 +194,7 @@ impl SonixxApp {
 
 impl eframe::App for SonixxApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.animate(ui.ctx());
-
-        let running = self.running;
+        let running = self.engine.is_running();
         let mut toggle_running = false;
 
         egui::Panel::top("header")
@@ -162,18 +263,20 @@ impl eframe::App for SonixxApp {
             });
 
         if toggle_running {
-            self.running = !self.running;
-            self.status = if self.running {
-                "Roteando (simulação de interface). A engine de áudio entra na fase 2.".to_string()
+            if self.engine.is_running() {
+                self.engine.stop();
+                self.status = "Parado.".to_string();
             } else {
-                "Parado.".to_string()
-            };
+                self.start_engine();
+            }
         }
 
-        let mut play = None;
-        let mut open_folder = false;
-        let status = self.status.clone();
-
+        let status = self.engine.error().unwrap_or_else(|| self.status.clone());
+        let status_color = if self.engine.error().is_some() {
+            RED
+        } else {
+            MUTED
+        };
         egui::Panel::bottom("soundboard")
             .exact_size(116.0)
             .frame(
@@ -186,43 +289,39 @@ impl eframe::App for SonixxApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("SOUNDBOARD").size(11.0).strong().color(MUTED));
                     for name in ["Airhorn", "Aplausos", "Risada", "Tambor"] {
-                        if ui
-                            .add_sized([96.0, 30.0], egui::Button::new(name))
-                            .clicked()
-                        {
-                            play = Some(name);
-                        }
+                        ui.add_enabled(
+                            false,
+                            egui::Button::new(name).min_size(egui::vec2(96.0, 30.0)),
+                        )
+                        .on_disabled_hover_text("O soundboard em Rust entra na próxima fase.");
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_sized([150.0, 30.0], egui::Button::new("Abrir pasta de sons"))
-                            .clicked()
-                        {
-                            open_folder = true;
-                        }
-                    });
                 });
                 ui.add_space(6.0);
-                ui.label(RichText::new(status).size(11.0).color(MUTED));
+                ui.label(RichText::new(status).size(11.0).color(status_color));
             });
 
-        if let Some(name) = play {
-            self.status = format!("Tocando: {name} (engine de áudio na próxima fase).");
-        }
-        if open_folder {
-            self.status = format!("Pasta de sons: {}", "sounds/");
-        }
-
-        let mut master_volume = self.master_volume;
-        let mut master_muted = self.master_muted;
+        let outputs = &self.outputs;
+        let inputs = &self.inputs;
+        let mut output_id = self.output_id.clone();
+        let mut loopback_id = self.loopback_id.clone();
+        let mut mic_choice = self.mic_choice.clone();
+        let mics = self.mics.clone();
+        let mut master_volume = self.engine.master_volume();
+        let mut master_muted = self.engine.master_muted();
         let mut monitor = self.monitor;
+        let mut add_mic = false;
+        let mut remove_mic = None;
         let mut save = false;
-        let master_peak = self.master_peak();
-        let app_count = self.apps.len();
-        let mic_count = self.mics.len();
+        let mut reload = false;
+        let running = self.engine.is_running();
+        let output_rate = self.engine.output_rate();
+        let source_count = self.engine.sources().len();
+        let engine_error = self.engine.error();
+        let master_peak = self.engine.master_peak();
+        let vb_installed = self.vb_cable_installed;
 
         egui::Panel::right("output")
-            .exact_size(332.0)
+            .exact_size(360.0)
             .frame(
                 egui::Frame::new()
                     .fill(PANEL)
@@ -230,114 +329,198 @@ impl eframe::App for SonixxApp {
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ui, |ui| {
-                ui.label(RichText::new("SAÍDA").size(11.0).strong().color(MUTED));
-                ui.add_space(4.0);
-                theme::card_frame().show(ui, |ui| {
-                    ui.label(RichText::new("CABLE Input").size(15.0).strong());
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.label(RichText::new("SAÍDA").size(11.0).strong().color(MUTED));
+                    ui.add_space(4.0);
+                    theme::card_frame().show(ui, |ui| {
+                        ui.label(RichText::new("Dispositivo de saída").size(11.0).color(MUTED));
+                        device_combo(ui, "output-device", &mut output_id, outputs);
+                        if !vb_installed {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(
+                                    "VB-Cable não instalado. A saída será um dispositivo normal, não um microfone virtual.",
+                                )
+                                .size(10.0)
+                                .color(AMBER),
+                            );
+                        }
+
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("Capturar áudio de").size(11.0).color(MUTED));
+                        device_combo(ui, "loopback-device", &mut loopback_id, outputs);
+                        ui.label(
+                            RichText::new("Loopback WASAPI do dispositivo selecionado.")
+                                .size(10.0)
+                                .color(MUTED),
+                        );
+
+                        ui.add_space(12.0);
+                        ui.label(RichText::new("Volume máster").size(11.0).color(MUTED));
+                        let slider_width = (ui.available_width() - 8.0).max(80.0);
+                        ui.spacing_mut().slider_width = slider_width;
+                        ui.add(egui::Slider::new(&mut master_volume, 0.0..=2.0).show_value(false));
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("{:.0}%", master_volume * 100.0))
+                                    .size(12.0)
+                                    .color(TEXT),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add_sized(
+                                            [70.0, 26.0],
+                                            egui::Button::new(if master_muted { "Mudo" } else { "Som" }),
+                                        )
+                                        .clicked()
+                                    {
+                                        master_muted = !master_muted;
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(6.0);
+                        theme::meter(ui, if master_muted { 0.0 } else { master_peak }, 8.0);
+                        ui.add_space(8.0);
+                        ui.add_enabled(false, egui::Checkbox::new(&mut monitor, "Monitor mix"))
+                            .on_disabled_hover_text("Monitor mix entra na próxima fase.");
+                    });
+
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("MICROFONES").size(11.0).strong().color(MUTED));
+                    ui.add_space(4.0);
+                    theme::card_frame().show(ui, |ui| {
+                        device_combo(ui, "mic-choice", &mut mic_choice, inputs);
+                        let add_width = ui.available_width();
+                        if ui
+                            .add_enabled(
+                                !mic_choice.is_empty(),
+                                egui::Button::new("+ Adicionar microfone")
+                                    .min_size(egui::vec2(add_width, 28.0)),
+                            )
+                            .clicked()
+                        {
+                            add_mic = true;
+                        }
+                        ui.add_space(6.0);
+                        if mics.is_empty() {
+                            ui.label(
+                                RichText::new("Nenhum microfone adicionado.")
+                                    .size(11.0)
+                                    .color(MUTED),
+                            );
+                        }
+                        for (index, mic) in mics.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(mic.name.as_str()).size(11.0).color(TEXT));
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add_sized([64.0, 22.0], egui::Button::new("Remover"))
+                                            .clicked()
+                                        {
+                                            remove_mic = Some(index);
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    });
+
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("STATUS").size(11.0).strong().color(MUTED));
+                    ui.add_space(4.0);
+                    theme::card_frame().show(ui, |ui| {
+                        status_row(ui, "Engine", if running { "rodando" } else { "parada" });
+                        status_row(
+                            ui,
+                            "Taxa de saída",
+                            &if output_rate > 0 {
+                                format!("{output_rate} Hz")
+                            } else {
+                                "—".to_string()
+                            },
+                        );
+                        status_row(ui, "Fontes", &source_count.to_string());
+                        status_row(
+                            ui,
+                            "VB-Cable",
+                            if vb_installed {
+                                "instalado"
+                            } else {
+                                "não instalado"
+                            },
+                        );
+                        if let Some(error) = &engine_error {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!("Erro: {error}"))
+                                    .size(10.0)
+                                    .color(RED),
+                            );
+                        }
+                    });
+
+                    ui.add_space(12.0);
+                    let width = ui.available_width();
+                    if ui
+                        .add_sized([width, 30.0], egui::Button::new("Atualizar dispositivos"))
+                        .clicked()
+                    {
+                        reload = true;
+                    }
+                    ui.add_space(4.0);
+                    if ui
+                        .add_sized([width, 30.0], egui::Button::new("Salvar configurações"))
+                        .clicked()
+                    {
+                        save = true;
+                    }
+                    ui.add_space(4.0);
                     ui.label(
-                        RichText::new("VB-Audio Virtual Cable")
-                            .size(11.0)
+                        RichText::new(format!("Sonixx v{APP_VERSION} · Rust"))
+                            .size(10.0)
                             .color(MUTED),
                     );
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("Volume máster").size(12.0).color(MUTED));
-                    let slider_width = (ui.available_width() - 8.0).max(80.0);
-                    ui.spacing_mut().slider_width = slider_width;
-                    ui.add(egui::Slider::new(&mut master_volume, 0.0..=2.0).show_value(false));
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!("{:.0}%", master_volume * 100.0))
-                                .size(12.0)
-                                .color(TEXT),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .add_sized(
-                                    [70.0, 26.0],
-                                    egui::Button::new(if master_muted { "Mudo" } else { "Som" }),
-                                )
-                                .clicked()
-                            {
-                                master_muted = !master_muted;
-                            }
-                        });
-                    });
-                    ui.add_space(6.0);
-                    theme::meter(ui, if master_muted { 0.0 } else { master_peak }, 8.0);
-                    ui.add_space(10.0);
-                    ui.checkbox(&mut monitor, "Monitor mix (ouvir nos fones)");
                 });
-
-                ui.add_space(12.0);
-                ui.label(RichText::new("STATUS").size(11.0).strong().color(MUTED));
-                ui.add_space(4.0);
-                theme::card_frame().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Aplicativos").size(12.0).color(MUTED));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(format!("{app_count}"))
-                                    .size(12.0)
-                                    .strong()
-                                    .color(TEXT),
-                            );
-                        });
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Microfones").size(12.0).color(MUTED));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(format!("{mic_count}"))
-                                    .size(12.0)
-                                    .strong()
-                                    .color(TEXT),
-                            );
-                        });
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Taxa").size(12.0).color(MUTED));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new("48 kHz").size(12.0).color(TEXT));
-                        });
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Engine").size(12.0).color(MUTED));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new("em construção").size(12.0).color(AMBER));
-                        });
-                    });
-                });
-
-                ui.add_space(12.0);
-                let save_width = ui.available_width();
-                if ui
-                    .add_sized(
-                        [save_width, 32.0],
-                        egui::Button::new("Salvar configurações"),
-                    )
-                    .clicked()
-                {
-                    save = true;
-                }
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(format!("Sonixx v{APP_VERSION} · Rust"))
-                        .size(10.0)
-                        .color(MUTED),
-                );
             });
 
-        self.master_volume = master_volume;
-        self.master_muted = master_muted;
+        self.output_id = output_id;
+        self.loopback_id = loopback_id;
+        self.mic_choice = mic_choice;
+        self.mics = mics;
         self.monitor = monitor;
+        self.engine.set_master_volume(master_volume);
+        self.engine.set_master_muted(master_muted);
+        if add_mic {
+            if let Some(device) = inputs
+                .iter()
+                .find(|device| device.id == self.mic_choice)
+                .cloned()
+            {
+                if !self.mics.iter().any(|mic| mic.id == device.id) {
+                    self.mics.push(device);
+                }
+            }
+        }
+        if let Some(index) = remove_mic {
+            if index < self.mics.len() {
+                self.mics.remove(index);
+            }
+        }
         if save {
             self.save_settings();
         }
+        if reload {
+            self.reload_devices();
+        }
 
-        let running = self.running;
+        let running = self.engine.is_running();
         let mut tab = self.tab;
-        let mut remove_app = None;
-        let mut remove_mic = None;
+        let sources: Vec<SourceControl> = self.engine.sources().to_vec();
 
         egui::CentralPanel::default()
             .frame(
@@ -348,81 +531,94 @@ impl eframe::App for SonixxApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Fontes de áudio").size(20.0).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_enabled(
-                            false,
-                            egui::Button::new("+ Adicionar microfone")
-                                .min_size(egui::vec2(156.0, 30.0)),
-                        )
-                        .on_disabled_hover_text(
-                            "A enumeração real de microfones entra na fase 2 (WASAPI).",
-                        );
-                        ui.add_enabled(
-                            false,
-                            egui::Button::new("+ Adicionar app")
-                                .min_size(egui::vec2(140.0, 30.0)),
-                        )
-                        .on_disabled_hover_text(
-                            "A detecção real de aplicativos entra na fase 3 (WASAPI).",
-                        );
-                    });
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.label(
+                                RichText::new(if running {
+                                    "Áudio real (WASAPI)"
+                                } else {
+                                    "Engine parada"
+                                })
+                                .size(11.0)
+                                .color(if running { GREEN } else { MUTED }),
+                            );
+                        },
+                    );
                 });
-
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.selectable_value(
-                        &mut tab,
-                        Tab::Apps,
-                        format!("Aplicativos ({})", self.apps.len()),
-                    );
+                    ui.selectable_value(&mut tab, Tab::System, "Áudio do sistema");
                     ui.selectable_value(
                         &mut tab,
                         Tab::Mics,
-                        format!("Microfones ({})", self.mics.len()),
+                        format!("Microfones ({})", sources.iter().filter(|s| s.kind == SourceKind::Mic).count()),
                     );
                 });
                 ui.add_space(8.0);
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| match tab {
-                        Tab::Apps => {
-                            if self.apps.is_empty() {
-                                empty_state(
-                                    ui,
-                                    "Nenhum aplicativo detectado.\nA captura por processo entra na fase 3 (WASAPI).",
-                                );
-                            }
-                            for (index, source) in self.apps.iter_mut().enumerate() {
-                                if source_card(ui, source, running) {
-                                    remove_app = Some(index);
-                                }
-                            }
+                    .show(ui, |ui| {
+                        if !running {
+                            empty_state(
+                                ui,
+                                "A engine está parada.\nEscolha a saída e a fonte de áudio do sistema e clique em Iniciar.",
+                            );
+                            return;
                         }
-                        Tab::Mics => {
-                            if self.mics.is_empty() {
-                                empty_state(
-                                    ui,
-                                    "Nenhum microfone detectado.\nA enumeração real de dispositivos entra na fase 2 (WASAPI).",
-                                );
-                            }
-                            for (index, source) in self.mics.iter_mut().enumerate() {
-                                if source_card(ui, source, running) {
-                                    remove_mic = Some(index);
-                                }
+                        let filtered: Vec<&SourceControl> = sources
+                            .iter()
+                            .filter(|source| match tab {
+                                Tab::System => source.kind == SourceKind::System,
+                                Tab::Mics => source.kind == SourceKind::Mic,
+                            })
+                            .collect();
+                        if filtered.is_empty() {
+                            empty_state(ui, "Nenhuma fonte nesta categoria.");
+                        } else {
+                            for source in filtered {
+                                source_card(ui, source);
                             }
                         }
                     });
             });
 
         self.tab = tab;
-        if let Some(index) = remove_app {
-            self.apps.remove(index);
-        }
-        if let Some(index) = remove_mic {
-            self.mics.remove(index);
-        }
     }
+}
+
+fn device_name(devices: &[AudioDevice], id: &str) -> String {
+    devices
+        .iter()
+        .find(|device| device.id == id)
+        .map(|device| device.name.clone())
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn device_combo(ui: &mut egui::Ui, salt: &str, selected: &mut String, devices: &[AudioDevice]) {
+    let current = devices
+        .iter()
+        .find(|device| &device.id == selected)
+        .map(|device| device.name.clone())
+        .unwrap_or_else(|| "Selecionar...".to_string());
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(current)
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for device in devices {
+                ui.selectable_value(selected, device.id.clone(), &device.name);
+            }
+        });
+}
+
+fn status_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).size(11.0).color(MUTED));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(value).size(11.0).strong().color(TEXT));
+        });
+    });
 }
 
 fn empty_state(ui: &mut egui::Ui, text: &str) {
@@ -436,8 +632,7 @@ fn empty_state(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-fn source_card(ui: &mut egui::Ui, source: &mut Source, running: bool) -> bool {
-    let mut remove = false;
+fn source_card(ui: &mut egui::Ui, source: &SourceControl) {
     theme::card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -461,47 +656,46 @@ fn source_card(ui: &mut egui::Ui, source: &mut Source, running: bool) -> bool {
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_sized([74.0, 26.0], egui::Button::new("Remover"))
-                    .clicked()
-                {
-                    remove = true;
+                let mut active = source.active();
+                if ui.checkbox(&mut active, "Ativo").changed() {
+                    source.set_active(active);
                 }
                 if ui
                     .add_sized(
                         [58.0, 26.0],
-                        egui::Button::new(if source.muted { "Mudo" } else { "Som" }),
+                        egui::Button::new(if source.muted() { "Mudo" } else { "Som" }),
                     )
                     .clicked()
                 {
-                    source.muted = !source.muted;
+                    source.set_muted(!source.muted());
                 }
             });
         });
 
         ui.add_space(6.0);
+        let mut volume = source.volume();
         ui.horizontal(|ui| {
             ui.spacing_mut().slider_width = 190.0;
-            ui.add(egui::Slider::new(&mut source.volume, 0.0..=2.0).show_value(false));
+            if ui
+                .add(egui::Slider::new(&mut volume, 0.0..=2.0).show_value(false))
+                .changed()
+            {
+                source.set_volume(volume);
+            }
             ui.label(
-                RichText::new(format!("{:.0}%", source.volume * 100.0))
+                RichText::new(format!("{:.0}%", volume * 100.0))
                     .size(11.0)
                     .color(MUTED),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.checkbox(&mut source.active, "Ativo");
+                ui.label(
+                    RichText::new(format!("{} Hz", source.sample_rate()))
+                        .size(10.0)
+                        .color(MUTED),
+                );
             });
         });
         ui.add_space(4.0);
-        theme::meter(
-            ui,
-            if running && source.active && !source.muted {
-                source.peak
-            } else {
-                0.0
-            },
-            6.0,
-        );
+        theme::meter(ui, source.peak(), 6.0);
     });
-    remove
 }

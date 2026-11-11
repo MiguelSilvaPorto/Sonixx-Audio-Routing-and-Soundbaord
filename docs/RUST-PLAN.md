@@ -130,25 +130,30 @@ do engine e envia comandos por canal; nunca bloqueia o áudio.
 - `AGENTS.md` e este plano.
 - Toolchain Rust MSVC instalado.
 
-### Fase 1 — Fundação
+### Fase 1 — Fundação (concluída)
 
-- Workspace + crates vazios.
-- Janela egui com tema escuro e navegação básica.
+- Workspace + `sonixx-core` + `sonixx-app`.
+- Janela egui com tema escuro e layout do app.
 - Settings (`%APPDATA%\Sonixx\settings.json`).
-- Enumeração de dispositivos e processos (somente leitura).
-- Teste de fumaça: abrir, listar, fechar.
+- Enumeração real de dispositivos WASAPI e seleção na UI.
+- **Python removido do repositório.**
 
-### Fase 2 — Engine base
+### Fase 2 — Engine base (em andamento)
 
-- Microfone + loopback do sistema → mixer → VB-Cable.
-- Master volume/mute, medidores.
-- Monitor mix.
-- Testes unitários do mixer/ring buffer.
+- [x] Estrutura da engine: threads, ring buffers, mixer, render WASAPI.
+- [x] Volume máster, mute, medidores e settings.
+- [x] Captura de microfone e loopback do sistema (código Rust).
+- [ ] Validar captura em máquina com permissão de microfone liberada —
+      em alguns ambientes corporativos o `IAudioClient::Initialize` de captura
+      retorna `E_INVALIDARG` até para bibliotecas de referência; testar em
+      máquina limpa e registrar o resultado.
+- [ ] Monitor mix.
+- [ ] Testes unitários do mixer/ring buffer.
 
 ### Fase 3 — Captura por processo
 
-- Implementar process loopback WASAPI.
-- Substituir a DLL; testar com Chrome/Spotify/jogo.
+- Implementar process loopback WASAPI (`ActivateAudioInterfaceAsync`).
+- Testar com Chrome/Spotify/jogo.
 - Auto-exclusão do próprio processo.
 
 ### Fase 4 — Soundboard, tray e hotkeys

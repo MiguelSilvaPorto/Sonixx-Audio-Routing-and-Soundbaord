@@ -1,8 +1,9 @@
-//! Core types and settings shared by the Sonixx app and the future audio engine.
+//! Core types, settings and audio engine shared by the Sonixx app.
 
+pub mod audio;
 pub mod settings;
 
-pub use settings::Settings;
+pub use settings::{MicSelection, Settings};
 
 pub const APP_NAME: &str = "Sonixx";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
