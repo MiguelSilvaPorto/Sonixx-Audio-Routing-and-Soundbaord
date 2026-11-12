@@ -113,6 +113,8 @@ Regras de arquitetura:
   (`ActivateAudioInterfaceAsync` + `AUDIOCLIENT_ACTIVATION_PARAMS`).
 - **Nada de `process-audio-capture`**: o loopback por processo é implementado
   em Rust, sem DLL externa.
+- **Extensão opcional do Chrome** (`chrome-extension/`): só detecta abas
+  audíveis via `chrome.tabs`; o app continua Rust. Não captura áudio.
 - Reamostragem com `rubato`; decodificação de áudio do soundboard com
   `symphonia`.
 - Processos com `sysinfo`; hotkeys com `global-hotkey`; tray com `tray-icon`.

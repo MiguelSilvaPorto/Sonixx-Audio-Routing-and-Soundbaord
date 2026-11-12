@@ -26,6 +26,7 @@ fn main() -> Result<()> {
         app_sources: vec![AppSource {
             pid,
             name: format!("Processo {pid}"),
+            exe: None,
         }],
         mic_devices: Vec::new(),
         master_volume: 0.5,

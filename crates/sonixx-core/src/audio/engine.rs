@@ -26,6 +26,7 @@ pub enum SourceKind {
 pub struct AppSource {
     pub pid: u32,
     pub name: String,
+    pub exe: Option<String>,
 }
 
 pub struct Sound {
@@ -39,6 +40,7 @@ pub struct SourceControl {
     pub name: String,
     pub detail: String,
     pub kind: SourceKind,
+    pub exe: Option<String>,
     volume: Arc<AtomicU32>,
     active: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
@@ -53,6 +55,7 @@ impl SourceControl {
             name,
             detail,
             kind,
+            exe: None,
             volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             active: Arc::new(AtomicBool::new(true)),
             muted: Arc::new(AtomicBool::new(false)),
@@ -286,12 +289,13 @@ impl Engine {
 
         // Per-application process loopback sources.
         for app in &config.app_sources {
-            let control = SourceControl::new(
+            let mut control = SourceControl::new(
                 next_id,
                 app.name.clone(),
                 format!("Aplicativo · PID {}", app.pid),
                 SourceKind::App,
             );
+            control.exe = app.exe.clone();
             next_id += 1;
             let rb = HeapRb::<f32>::new(192_000 * 2);
             let (producer, consumer) = rb.split();

@@ -1,16 +1,20 @@
+use crate::icons;
 use crate::theme::{self, *};
 use eframe::egui::{self, Color32, RichText};
 use sonixx_core::audio::{
     default_device, default_output_peak, list_audio_sessions, list_devices, AppSource, AudioDevice,
     AudioSession, DeviceFlow, Engine, EngineConfig, SourceControl, SourceKind,
 };
+use sonixx_core::chrome_bridge::{ChromeBridge, ChromeTab};
 use sonixx_core::{MicSelection, Settings, APP_VERSION};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     System,
     Apps,
+    Chrome,
     Mics,
 }
 
@@ -30,7 +34,7 @@ pub struct SonixxApp {
     mics: Vec<AudioDevice>,
     sessions: Vec<AudioSession>,
     selected_apps: Vec<AudioSession>,
-    app_choice_pid: u32,
+    app_choice_session: String,
     sounds: Vec<SoundEntry>,
     tab: Tab,
     status: String,
@@ -39,6 +43,11 @@ pub struct SonixxApp {
     monitor: bool,
     last_sessions_refresh: f64,
     system_peak: f32,
+    icons: HashMap<String, egui::TextureHandle>,
+    show_silent: bool,
+    chrome_bridge: Option<ChromeBridge>,
+    chrome_tabs: Vec<ChromeTab>,
+    bridge_error: Option<String>,
 }
 
 impl SonixxApp {
@@ -50,6 +59,10 @@ impl SonixxApp {
         let settings = Settings::load();
         let engine = Engine::new();
         engine.set_master_volume(settings.master_volume.clamp(0.0, 2.0));
+        let (chrome_bridge, bridge_error) = match ChromeBridge::start() {
+            Ok(bridge) => (Some(bridge), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
 
         let mut app = Self {
             engine,
@@ -61,7 +74,7 @@ impl SonixxApp {
             mics: Vec::new(),
             sessions: Vec::new(),
             selected_apps: Vec::new(),
-            app_choice_pid: 0,
+            app_choice_session: String::new(),
             sounds: Vec::new(),
             tab: Tab::Apps,
             status: "Selecione a saída e a fonte de áudio do sistema.".to_string(),
@@ -70,6 +83,11 @@ impl SonixxApp {
             vb_cable_installed: false,
             last_sessions_refresh: 0.0,
             system_peak: 0.0,
+            icons: HashMap::new(),
+            show_silent: true,
+            chrome_bridge,
+            chrome_tabs: Vec::new(),
+            bridge_error,
         };
         app.reload_devices();
         app.refresh_sounds();
@@ -164,13 +182,13 @@ impl SonixxApp {
         if !self
             .sessions
             .iter()
-            .any(|session| session.pid == self.app_choice_pid)
+            .any(|session| session.session_id == self.app_choice_session)
         {
-            self.app_choice_pid = self
+            self.app_choice_session = self
                 .sessions
                 .first()
-                .map(|session| session.pid)
-                .unwrap_or(0);
+                .map(|session| session.session_id.clone())
+                .unwrap_or_default();
         }
     }
 
@@ -228,6 +246,7 @@ impl SonixxApp {
                         .map(|session| AppSource {
                             pid: session.pid,
                             name: session.name.clone(),
+                            exe: session.exe.clone(),
                         })
                         .collect(),
                     mic_devices: self.mics.clone(),
@@ -248,6 +267,17 @@ impl SonixxApp {
                     .to_string();
             }
         }
+    }
+
+    fn icon_for(&mut self, ctx: &egui::Context, exe: Option<&str>) -> Option<egui::TextureHandle> {
+        let exe = exe?;
+        if let Some(texture) = self.icons.get(exe) {
+            return Some(texture.clone());
+        }
+        let image = icons::load_exe_icon(exe)?;
+        let texture = ctx.load_texture(exe.to_string(), image, egui::TextureOptions::LINEAR);
+        self.icons.insert(exe.to_string(), texture.clone());
+        Some(texture)
     }
 
     fn save_settings(&mut self) {
@@ -278,6 +308,9 @@ impl eframe::App for SonixxApp {
         if now - self.last_sessions_refresh >= 0.5 {
             self.last_sessions_refresh = now;
             self.refresh_sessions();
+            if let Some(bridge) = &self.chrome_bridge {
+                self.chrome_tabs = bridge.tabs();
+            }
         }
 
         let running = self.engine.is_running();
@@ -470,7 +503,7 @@ impl eframe::App for SonixxApp {
         let mics = self.mics.clone();
         let sessions = self.sessions.clone();
         let selected_apps = self.selected_apps.clone();
-        let mut app_choice_pid = self.app_choice_pid;
+        let mut app_choice_session = self.app_choice_session.clone();
         let mut add_app = false;
         let mut remove_app = None;
         let mut refresh_apps = false;
@@ -568,11 +601,11 @@ impl eframe::App for SonixxApp {
                     ui.label(RichText::new("APLICATIVOS").size(11.0).strong().color(MUTED));
                     ui.add_space(4.0);
                     theme::card_frame().show(ui, |ui| {
-                        session_combo(ui, "app-choice", &mut app_choice_pid, &sessions);
+                        session_combo(ui, "app-choice", &mut app_choice_session, &sessions);
                         let add_width = ui.available_width();
                         if ui
                             .add_enabled(
-                                app_choice_pid != 0,
+                                !app_choice_session.is_empty(),
                                 egui::Button::new("+ Adicionar aplicativo")
                                     .min_size(egui::vec2(add_width, 28.0)),
                             )
@@ -719,20 +752,20 @@ impl eframe::App for SonixxApp {
         self.mic_choice = mic_choice;
         self.mics = mics;
         self.selected_apps = selected_apps;
-        self.app_choice_pid = app_choice_pid;
+        self.app_choice_session = app_choice_session;
         self.monitor = monitor;
         self.engine.set_master_volume(master_volume);
         self.engine.set_master_muted(master_muted);
         if add_app {
             if let Some(session) = sessions
                 .iter()
-                .find(|session| session.pid == self.app_choice_pid)
+                .find(|session| session.session_id == self.app_choice_session)
                 .cloned()
             {
                 if !self
                     .selected_apps
                     .iter()
-                    .any(|selected| selected.pid == session.pid)
+                    .any(|selected| selected.session_id == session.session_id)
                 {
                     self.selected_apps.push(session);
                 }
@@ -772,8 +805,62 @@ impl eframe::App for SonixxApp {
         let running = self.engine.is_running();
         let mut tab = self.tab;
         let detected_sessions = self.sessions.clone();
-        let detected_app_count = detected_sessions.len();
+        let chrome_tabs = self.chrome_tabs.clone();
+        let bridge_error = self.bridge_error.clone();
+        let bridge_port = self
+            .chrome_bridge
+            .as_ref()
+            .map(|bridge| bridge.port())
+            .unwrap_or(37_645);
+        let mut open_extension = false;
+        let has_chrome = detected_sessions.iter().any(|session| {
+            session
+                .exe
+                .as_deref()
+                .map(|exe| exe.to_lowercase().ends_with("chrome.exe"))
+                .unwrap_or(false)
+        });
+        let mut show_silent = self.show_silent;
+        let detected_app_count = if show_silent {
+            detected_sessions.len()
+        } else {
+            detected_sessions
+                .iter()
+                .filter(|session| session.peak > 0.001)
+                .count()
+        };
         let sources: Vec<SourceControl> = self.engine.sources().to_vec();
+        let chrome_exe = detected_sessions
+            .iter()
+            .find_map(|session| {
+                session
+                    .exe
+                    .clone()
+                    .filter(|exe| exe.to_lowercase().ends_with("chrome.exe"))
+            })
+            .or_else(|| {
+                let path = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe".to_string();
+                std::path::Path::new(&path).exists().then_some(path)
+            });
+        let chrome_icon = self.icon_for(ui.ctx(), chrome_exe.as_deref());
+        let detected_views: Vec<(AudioSession, Option<egui::TextureHandle>)> = detected_sessions
+            .iter()
+            .map(|session| {
+                (
+                    session.clone(),
+                    self.icon_for(ui.ctx(), session.exe.as_deref()),
+                )
+            })
+            .collect();
+        let source_views: Vec<(SourceControl, Option<egui::TextureHandle>)> = sources
+            .iter()
+            .map(|source| {
+                (
+                    source.clone(),
+                    self.icon_for(ui.ctx(), source.exe.as_deref()),
+                )
+            })
+            .collect();
 
         egui::CentralPanel::default()
             .frame(
@@ -813,6 +900,11 @@ impl eframe::App for SonixxApp {
                     ui.selectable_value(&mut tab, Tab::Apps, format!("Aplicativos ({app_count})"));
                     ui.selectable_value(
                         &mut tab,
+                        Tab::Chrome,
+                        format!("Chrome ({})", chrome_tabs.len()),
+                    );
+                    ui.selectable_value(
+                        &mut tab,
                         Tab::Mics,
                         format!(
                             "Microfones ({})",
@@ -822,22 +914,66 @@ impl eframe::App for SonixxApp {
                                 .count()
                         ),
                     );
+                    if tab == Tab::Apps {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.checkbox(&mut show_silent, "Mostrar silenciosos");
+                        });
+                    }
                 });
+                if tab == Tab::Apps && has_chrome {
+                    ui.label(
+                        RichText::new(
+                            "O Windows expõe o Chrome como uma sessão única; abas não são separadas pelo WASAPI.",
+                        )
+                        .size(10.0)
+                        .color(AMBER),
+                    );
+                }
                 ui.add_space(8.0);
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        if tab == Tab::Chrome {
+                            if chrome_tabs.is_empty() {
+                                chrome_setup_card(
+                                    ui,
+                                    bridge_error.as_deref(),
+                                    bridge_port,
+                                    &mut open_extension,
+                                );
+                            } else {
+                                for chrome_tab in &chrome_tabs {
+                                    chrome_tab_card(ui, chrome_tab, chrome_icon.as_ref());
+                                }
+                                ui.add_space(4.0);
+                                if ui.button("Abrir pasta da extensão").clicked() {
+                                    open_extension = true;
+                                }
+                            }
+                            return;
+                        }
                         if !running {
                             if tab == Tab::Apps {
-                                if detected_sessions.is_empty() {
+                                let visible: Vec<&(AudioSession, Option<egui::TextureHandle>)> =
+                                    detected_views
+                                        .iter()
+                                        .filter(|(session, _)| {
+                                            show_silent || session.peak > 0.001
+                                        })
+                                        .collect();
+                                if visible.is_empty() {
                                     empty_state(
                                         ui,
-                                        "Nenhum aplicativo com sessão de áudio.\nAbra um player e toque algo — o detector lê o medidor de cada sessão.",
+                                        if show_silent {
+                                            "Nenhuma sessão de áudio encontrada.\nAbra um player e toque algo — o detector lê o medidor de cada sessão."
+                                        } else {
+                                            "Nenhum app tocando agora.\nMarque “Mostrar silenciosos” para ver todas as sessões."
+                                        },
                                     );
                                 } else {
-                                    for session in &detected_sessions {
-                                        detected_session_card(ui, session);
+                                    for (session, icon) in visible {
+                                        detected_session_card(ui, session, icon.as_ref());
                                     }
                                 }
                             } else {
@@ -848,14 +984,16 @@ impl eframe::App for SonixxApp {
                             }
                             return;
                         }
-                        let filtered: Vec<&SourceControl> = sources
-                            .iter()
-                            .filter(|source| match tab {
-                                Tab::System => source.kind == SourceKind::System,
-                                Tab::Apps => source.kind == SourceKind::App,
-                                Tab::Mics => source.kind == SourceKind::Mic,
-                            })
-                            .collect();
+                        let filtered: Vec<&(SourceControl, Option<egui::TextureHandle>)> =
+                            source_views
+                                .iter()
+                                .filter(|(source, _)| match tab {
+                                    Tab::System => source.kind == SourceKind::System,
+                                    Tab::Apps => source.kind == SourceKind::App,
+                                    Tab::Mics => source.kind == SourceKind::Mic,
+                                    Tab::Chrome => false,
+                                })
+                                .collect();
                         if filtered.is_empty() {
                             empty_state(
                                 ui,
@@ -867,17 +1005,24 @@ impl eframe::App for SonixxApp {
                                         "Nenhum microfone na mixagem.\nAdicione um microfone no painel direito e clique em Iniciar."
                                     }
                                     Tab::System => "Nenhuma fonte nesta categoria.",
+                                    Tab::Chrome => "",
                                 },
                             );
                         } else {
-                            for source in filtered {
-                                source_card(ui, source);
+                            for (source, icon) in filtered {
+                                source_card(ui, source, icon.as_ref());
                             }
                         }
                     });
             });
 
         self.tab = tab;
+        self.show_silent = show_silent;
+        if open_extension {
+            let _ = std::process::Command::new("explorer")
+                .arg(chrome_extension_dir())
+                .spawn();
+        }
     }
 }
 
@@ -914,10 +1059,10 @@ fn session_label(session: &AudioSession) -> String {
     format!("{} (PID {}){activity}", session.name, session.pid)
 }
 
-fn session_combo(ui: &mut egui::Ui, salt: &str, selected: &mut u32, sessions: &[AudioSession]) {
+fn session_combo(ui: &mut egui::Ui, salt: &str, selected: &mut String, sessions: &[AudioSession]) {
     let current = sessions
         .iter()
-        .find(|session| session.pid == *selected)
+        .find(|session| session.session_id == *selected)
         .map(session_label)
         .unwrap_or_else(|| "Selecionar...".to_string());
     egui::ComboBox::from_id_salt(salt)
@@ -925,25 +1070,37 @@ fn session_combo(ui: &mut egui::Ui, salt: &str, selected: &mut u32, sessions: &[
         .width(ui.available_width())
         .show_ui(ui, |ui| {
             for session in sessions {
-                ui.selectable_value(selected, session.pid, session_label(session));
+                ui.selectable_value(selected, session.session_id.clone(), session_label(session));
             }
         });
 }
 
-fn detected_session_card(ui: &mut egui::Ui, session: &AudioSession) {
+fn app_icon(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>, name: &str) {
+    if let Some(texture) = icon {
+        ui.add(egui::Image::from_texture((texture.id(), egui::vec2(34.0, 34.0))).corner_radius(8));
+    } else {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), 17.0, ACCENT_SOFT);
+        let initial = name.chars().next().unwrap_or('?').to_string();
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            initial,
+            egui::FontId::proportional(15.0),
+            ACCENT,
+        );
+    }
+}
+
+fn detected_session_card(
+    ui: &mut egui::Ui,
+    session: &AudioSession,
+    icon: Option<&egui::TextureHandle>,
+) {
     theme::card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
-            ui.painter().circle_filled(rect.center(), 17.0, ACCENT_SOFT);
-            let initial = session.name.chars().next().unwrap_or('?').to_string();
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                initial,
-                egui::FontId::proportional(15.0),
-                ACCENT,
-            );
+            app_icon(ui, icon, &session.name);
             ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new(session.name.as_str()).strong().size(14.0));
@@ -964,6 +1121,86 @@ fn detected_session_card(ui: &mut egui::Ui, session: &AudioSession) {
         });
         ui.add_space(4.0);
         theme::meter(ui, session.peak, 6.0);
+    });
+}
+
+fn chrome_extension_dir() -> PathBuf {
+    if let Ok(current) = std::env::current_dir() {
+        let dir = current.join("chrome-extension");
+        if dir.is_dir() {
+            return dir;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let dir = parent.join("chrome-extension");
+            if dir.is_dir() {
+                return dir;
+            }
+        }
+    }
+    PathBuf::from("chrome-extension")
+}
+
+fn chrome_setup_card(ui: &mut egui::Ui, error: Option<&str>, port: u16, open_folder: &mut bool) {
+    theme::card_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            RichText::new("Detectar abas do Chrome")
+                .size(16.0)
+                .strong(),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            "O Windows expõe o Chrome como uma sessão única. Para ver as abas que estão tocando, instale a extensão Sonixx Tab Bridge:",
+        );
+        ui.label("1. Abra chrome://extensions");
+        ui.label("2. Ative o Modo do desenvolvedor");
+        ui.label("3. Clique em Carregar sem compactação e escolha a pasta chrome-extension");
+        ui.label(format!(
+            "A ponte local escuta em 127.0.0.1:{port}. O Sonixx precisa estar aberto."
+        ));
+        ui.add_space(6.0);
+        if ui.button("Abrir pasta da extensão").clicked() {
+            *open_folder = true;
+        }
+        if let Some(error) = error {
+            ui.add_space(4.0);
+            ui.label(RichText::new(error).size(10.0).color(RED));
+        }
+    });
+}
+
+fn chrome_tab_card(ui: &mut egui::Ui, tab: &ChromeTab, icon: Option<&egui::TextureHandle>) {
+    theme::card_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            app_icon(ui, icon, "C");
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                let title = if tab.title.trim().is_empty() {
+                    "Aba do Chrome"
+                } else {
+                    tab.title.as_str()
+                };
+                ui.label(RichText::new(title).strong().size(14.0));
+                let domain = tab
+                    .url
+                    .split("://")
+                    .nth(1)
+                    .and_then(|rest| rest.split('/').next())
+                    .unwrap_or(tab.url.as_str());
+                ui.label(RichText::new(domain).size(11.0).color(MUTED));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (text, color) = if tab.audible {
+                    ("tocando", GREEN)
+                } else {
+                    ("silenciosa", MUTED)
+                };
+                ui.label(RichText::new(text).size(11.0).color(color));
+            });
+        });
     });
 }
 
@@ -1005,20 +1242,11 @@ fn empty_state(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-fn source_card(ui: &mut egui::Ui, source: &SourceControl) {
+fn source_card(ui: &mut egui::Ui, source: &SourceControl, icon: Option<&egui::TextureHandle>) {
     theme::card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
-            ui.painter().circle_filled(rect.center(), 17.0, ACCENT_SOFT);
-            let initial = source.name.chars().next().unwrap_or('?').to_string();
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                initial,
-                egui::FontId::proportional(15.0),
-                ACCENT,
-            );
+            app_icon(ui, icon, &source.name);
             ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new(source.name.as_str()).strong().size(14.0));

@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Sonixx Tab Bridge",
+  "version": "0.1.0",
+  "description": "Envia ao Sonixx as abas do Chrome que estão tocando áudio.",
+  "permissions": ["tabs"],
+  "host_permissions": ["http://127.0.0.1:37645/*"],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

@@ -17,6 +17,10 @@ Implementado:
 - Seleção de dispositivo de saída, fonte de loopback do sistema e microfones.
 - **Detector em tempo real** de áudio saindo do PC: endpoint e cada sessão
   (`IAudioMeterInformation`), sem captura e sem driver.
+- **Ícones reais** extraídos do executável de cada aplicativo (Shell do Windows),
+  com filtro de sessões de microfone e de processos do sistema.
+- **Abas do Chrome** via extensão opcional (`chrome-extension/`): títulos e
+  detecção das abas audíveis, sem depender de driver.
 - Captura por aplicativo via **process loopback WASAPI** nativo, sem DLL externa.
 - Soundboard tocando arquivos **WAV, MP3, FLAC, OGG e AAC** pela mixagem.
 - Engine Rust com captura WASAPI, mixagem, volume máster, mute e medidores.
@@ -35,6 +39,22 @@ Em desenvolvimento (próximas fases):
 > por aplicativo abre normalmente; a validação de áudio depende dessa liberação.
 > Detalhes e a matriz completa de testes estão em
 > [`docs/AUDIO-CAPTURE.md`](docs/AUDIO-CAPTURE.md).
+>
+> **Chrome:** o Windows expõe o navegador como **uma única sessão de áudio**;
+> abas individuais não são separadas pelo WASAPI. O Sonixx inclui uma extensão
+> opcional que **detecta** as abas audíveis (`chrome-extension/`). Capturar o
+> áudio de cada aba separadamente exigiria `chrome.tabCapture` + streaming PCM
+> para o app — próxima fase.
+
+## Abas do Chrome (opcional)
+
+1. Abra `chrome://extensions`.
+2. Ative o **Modo do desenvolvedor**.
+3. Clique em **Carregar sem compactação** e escolha a pasta `chrome-extension/`.
+4. Deixe o Sonixx aberto e use a aba **Chrome** do app.
+
+A extensão só lê `chrome.tabs.query({ audible: true })` e envia título/URL para
+`127.0.0.1:37645`. Ela não captura áudio nem envia dados para fora da máquina.
 
 ## Requisitos
 

@@ -115,6 +115,27 @@ dispositivo virtual) continua sendo necessário.
 - Captura por aplicativo implementada com process loopback.
 - Engine de captura/render e soundboard em Rust.
 
+## Abas do Chrome
+
+O dump de sessões mostra o Chrome como **uma única sessão**:
+
+```
+pid=15904  peak=0.137  exe=chrome.exe  sid=...chrome.exe%b{00000000-...}
+```
+
+O Teams, por outro lado, aparece com duas sessões distintas (dois GUIDs), o que
+confirma que o Windows separa **sessões**, não abas. O Chrome mistura as abas
+antes de entregar o áudio ao Windows; não existe API WASAPI para capturar uma
+aba específica.
+
+Para **detectar** abas audíveis foi incluída uma extensão opcional em
+`chrome-extension/` que consulta `chrome.tabs.query({ audible: true })` e envia
+título/URL para o app em `127.0.0.1:37645`. Ela não captura áudio.
+
+Para **capturar/controlar o volume de cada aba** seria necessário
+`chrome.tabCapture` + um fluxo PCM até o Sonixx (ou uma mistura Web Audio dentro
+da extensão). Isso é uma próxima fase e não é possível apenas com WASAPI.
+
 ## Ferramentas de diagnóstico
 
 ```powershell

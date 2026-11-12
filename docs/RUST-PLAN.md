@@ -143,7 +143,10 @@ do engine e envia comandos por canal; nunca bloqueia o áudio.
 - [x] Medidor do endpoint de saída (`IAudioMeterInformation`).
 - [x] Medidor por sessão de áudio (PID + nome + pico).
 - [x] Aba **Aplicativos** com estado `tocando`/`silencioso` em tempo real.
+- [x] Ícones reais dos executáveis e filtro de microfones/processos do sistema.
 - [x] Matriz de limites documentada em [`AUDIO-CAPTURE.md`](AUDIO-CAPTURE.md).
+- [ ] Abas individuais do Chrome: o WASAPI entrega uma sessão por processo;
+      requer extensão `chrome.tabCapture` + ponte local.
 
 ### Fase 2 — Engine base (em andamento)
 

@@ -29,7 +29,10 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, BLOB, CLSCTX_ALL,
     COINIT_MULTITHREADED, STGM_READ,
 };
-use windows::Win32::System::Threading::CreateEventW;
+use windows::Win32::System::Threading::{
+    CreateEventW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::System::Variant::VT_BLOB;
 
 const WAVE_FORMAT_PCM: u16 = 1;
@@ -432,6 +435,51 @@ pub struct AudioSession {
     pub pid: u32,
     pub name: String,
     pub peak: f32,
+    pub session_id: String,
+    pub exe: Option<String>,
+}
+
+fn process_exe(pid: u32) -> Option<String> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buffer = [0u16; 1024];
+        let mut size = buffer.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = CloseHandle(handle);
+        if result.is_ok() {
+            Some(String::from_utf16_lossy(&buffer[..size as usize]))
+        } else {
+            None
+        }
+    }
+}
+
+fn is_input_like_name(name: &str) -> bool {
+    let name = name.to_lowercase();
+    [
+        "microphone",
+        "microfone",
+        "headset",
+        "line in",
+        "stereo mix",
+        "mixagem",
+        "alto-falantes",
+        "speakers",
+    ]
+    .iter()
+    .any(|needle| name.contains(needle))
+}
+
+fn is_system_process(exe: &str) -> bool {
+    let exe = exe.to_lowercase();
+    ["audiodg.exe", "svchost.exe", "system", "idle", "registry"]
+        .iter()
+        .any(|needle| exe.ends_with(needle))
 }
 
 /// Lists applications that currently have an audio session on the default
@@ -489,6 +537,15 @@ pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
                 })
                 .unwrap_or_default()
         };
+        if is_input_like_name(&display) {
+            continue;
+        }
+        let exe = process_exe(pid);
+        if let Some(exe) = &exe {
+            if is_system_process(exe) {
+                continue;
+            }
+        }
         let name = if display.trim().is_empty() {
             if system.is_none() {
                 system = sysinfo::System::new_all().ok();
@@ -501,9 +558,20 @@ pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
         } else {
             display
         };
-        if name.trim().is_empty() {
+        if name.trim().is_empty() || is_input_like_name(&name) {
             continue;
         }
+        let session_id = unsafe {
+            control2
+                .GetSessionIdentifier()
+                .ok()
+                .map(|text| {
+                    let value = text.to_string().unwrap_or_default();
+                    CoTaskMemFree(Some(text.0 as *const core::ffi::c_void));
+                    value
+                })
+                .unwrap_or_default()
+        };
         // Peak meter of this specific session. This reads the samples that
         // already left the application, without opening a capture stream.
         let peak = control
@@ -511,10 +579,17 @@ pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
             .ok()
             .and_then(|meter| unsafe { meter.GetPeakValue().ok() })
             .unwrap_or(0.0);
-        found.push(AudioSession { pid, name, peak });
+        found.push(AudioSession {
+            pid,
+            name,
+            peak,
+            session_id,
+            exe,
+        });
     }
+    found.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+    found.dedup_by(|a, b| !a.session_id.is_empty() && a.session_id == b.session_id);
     found.sort_by_key(|session| session.name.to_lowercase());
-    found.dedup_by_key(|session| session.pid);
     Ok(found)
 }
 

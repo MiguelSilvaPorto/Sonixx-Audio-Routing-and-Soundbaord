@@ -25,6 +25,7 @@ fn main() -> Result<()> {
         app_sources: vec![AppSource {
             pid: std::process::id(),
             name: "Sonixx (eu mesmo)".to_string(),
+            exe: None,
         }],
         mic_devices: Vec::new(),
         master_volume: 0.5,
