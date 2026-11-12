@@ -6,6 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use windows::core::{implement, IUnknown, Interface, Ref, GUID};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
 use windows::Win32::Media::Audio::{
     eCapture, eConsole, eRender, ActivateAudioInterfaceAsync, EDataFlow,
     IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
@@ -174,6 +175,50 @@ pub fn default_device(flow: DeviceFlow) -> Result<AudioDevice> {
     let name = device_name(&device)?;
     let id = device_id(&device)?;
     Ok(AudioDevice { id, name, flow })
+}
+
+/// Peak level of the default playback endpoint (all sessions combined).
+/// This does not open a capture stream and does not require any driver.
+pub fn default_output_peak() -> Result<f32> {
+    let _com = ComGuard::new();
+    let enumerator = enumerator()?;
+    let device = unsafe {
+        enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .context("failed to read the default output device")?
+    };
+    let meter: IAudioMeterInformation = unsafe {
+        device
+            .Activate(CLSCTX_ALL, None)
+            .context("failed to open the output peak meter")?
+    };
+    unsafe {
+        meter
+            .GetPeakValue()
+            .context("failed to read the output peak")
+    }
+}
+
+/// Peak level of a specific playback endpoint.
+pub fn output_peak(device_id: &str) -> Result<f32> {
+    let _com = ComGuard::new();
+    let enumerator = enumerator()?;
+    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+    let device = unsafe {
+        enumerator
+            .GetDevice(windows::core::PCWSTR(wide.as_ptr()))
+            .context("failed to open the output device")?
+    };
+    let meter: IAudioMeterInformation = unsafe {
+        device
+            .Activate(CLSCTX_ALL, None)
+            .context("failed to open the output peak meter")?
+    };
+    unsafe {
+        meter
+            .GetPeakValue()
+            .context("failed to read the output peak")
+    }
 }
 
 pub fn is_vb_cable_installed() -> Result<bool> {
@@ -382,10 +427,11 @@ fn write_sample(out: &mut [u8], offset: usize, value: f32, bits: u16, is_float: 
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct AudioSession {
     pub pid: u32,
     pub name: String,
+    pub peak: f32,
 }
 
 /// Lists applications that currently have an audio session on the default
@@ -414,7 +460,7 @@ pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
             .context("failed to count audio sessions")?
     };
 
-    let system = sysinfo::System::new_all().ok();
+    let mut system: Option<sysinfo::System> = None;
     let mut found = Vec::new();
     for index in 0..count {
         let Ok(control) = (unsafe { sessions.GetSession(index) }) else {
@@ -443,20 +489,29 @@ pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
                 })
                 .unwrap_or_default()
         };
-        let process_name = system
-            .as_ref()
-            .and_then(|system| system.process(sysinfo::Pid::from_u32(pid)))
-            .map(|process| process.name().to_string_lossy().to_string())
-            .unwrap_or_default();
         let name = if display.trim().is_empty() {
-            process_name
+            if system.is_none() {
+                system = sysinfo::System::new_all().ok();
+            }
+            system
+                .as_ref()
+                .and_then(|system| system.process(sysinfo::Pid::from_u32(pid)))
+                .map(|process| process.name().to_string_lossy().to_string())
+                .unwrap_or_default()
         } else {
             display
         };
         if name.trim().is_empty() {
             continue;
         }
-        found.push(AudioSession { pid, name });
+        // Peak meter of this specific session. This reads the samples that
+        // already left the application, without opening a capture stream.
+        let peak = control
+            .cast::<IAudioMeterInformation>()
+            .ok()
+            .and_then(|meter| unsafe { meter.GetPeakValue().ok() })
+            .unwrap_or(0.0);
+        found.push(AudioSession { pid, name, peak });
     }
     found.sort_by_key(|session| session.name.to_lowercase());
     found.dedup_by_key(|session| session.pid);

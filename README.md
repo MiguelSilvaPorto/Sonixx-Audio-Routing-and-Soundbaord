@@ -15,6 +15,8 @@ Implementado:
 - Janela nativa com `egui`/`eframe` (sem webview), tema escuro.
 - Enumeração real de dispositivos WASAPI (saída e entrada).
 - Seleção de dispositivo de saída, fonte de loopback do sistema e microfones.
+- **Detector em tempo real** de áudio saindo do PC: endpoint e cada sessão
+  (`IAudioMeterInformation`), sem captura e sem driver.
 - Captura por aplicativo via **process loopback WASAPI** nativo, sem DLL externa.
 - Soundboard tocando arquivos **WAV, MP3, FLAC, OGG e AAC** pela mixagem.
 - Engine Rust com captura WASAPI, mixagem, volume máster, mute e medidores.
@@ -31,6 +33,8 @@ Em desenvolvimento (próximas fases):
 > Em alguns ambientes corporativos o Windows recusa a inicialização de
 > captura WASAPI (`E_INVALIDARG`) por política de segurança/driver. A captura
 > por aplicativo abre normalmente; a validação de áudio depende dessa liberação.
+> Detalhes e a matriz completa de testes estão em
+> [`docs/AUDIO-CAPTURE.md`](docs/AUDIO-CAPTURE.md).
 
 ## Requisitos
 

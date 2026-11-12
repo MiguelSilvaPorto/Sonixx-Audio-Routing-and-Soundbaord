@@ -138,6 +138,13 @@ do engine e envia comandos por canal; nunca bloqueia o áudio.
 - Enumeração real de dispositivos WASAPI e seleção na UI.
 - **Python removido do repositório.**
 
+### Detecção sem driver (concluída)
+
+- [x] Medidor do endpoint de saída (`IAudioMeterInformation`).
+- [x] Medidor por sessão de áudio (PID + nome + pico).
+- [x] Aba **Aplicativos** com estado `tocando`/`silencioso` em tempo real.
+- [x] Matriz de limites documentada em [`AUDIO-CAPTURE.md`](AUDIO-CAPTURE.md).
+
 ### Fase 2 — Engine base (em andamento)
 
 - [x] Estrutura da engine: threads, ring buffers, mixer, render WASAPI.

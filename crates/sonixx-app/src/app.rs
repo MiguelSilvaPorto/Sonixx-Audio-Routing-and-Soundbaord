@@ -1,8 +1,8 @@
 use crate::theme::{self, *};
 use eframe::egui::{self, Color32, RichText};
 use sonixx_core::audio::{
-    default_device, list_audio_sessions, list_devices, AppSource, AudioDevice, AudioSession,
-    DeviceFlow, Engine, EngineConfig, SourceControl, SourceKind,
+    default_device, default_output_peak, list_audio_sessions, list_devices, AppSource, AudioDevice,
+    AudioSession, DeviceFlow, Engine, EngineConfig, SourceControl, SourceKind,
 };
 use sonixx_core::{MicSelection, Settings, APP_VERSION};
 use std::path::PathBuf;
@@ -37,6 +37,8 @@ pub struct SonixxApp {
     settings: Settings,
     vb_cable_installed: bool,
     monitor: bool,
+    last_sessions_refresh: f64,
+    system_peak: f32,
 }
 
 impl SonixxApp {
@@ -61,11 +63,13 @@ impl SonixxApp {
             selected_apps: Vec::new(),
             app_choice_pid: 0,
             sounds: Vec::new(),
-            tab: Tab::System,
+            tab: Tab::Apps,
             status: "Selecione a saída e a fonte de áudio do sistema.".to_string(),
             monitor: settings.monitor,
             settings: settings.clone(),
             vb_cable_installed: false,
+            last_sessions_refresh: 0.0,
+            system_peak: 0.0,
         };
         app.reload_devices();
         app.refresh_sounds();
@@ -151,6 +155,7 @@ impl SonixxApp {
 
     fn refresh_sessions(&mut self) {
         self.sessions = list_audio_sessions().unwrap_or_default();
+        self.system_peak = default_output_peak().unwrap_or(0.0);
         self.selected_apps.retain(|selected| {
             self.sessions
                 .iter()
@@ -269,6 +274,12 @@ impl SonixxApp {
 
 impl eframe::App for SonixxApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let now = ui.ctx().input(|input| input.time);
+        if now - self.last_sessions_refresh >= 0.5 {
+            self.last_sessions_refresh = now;
+            self.refresh_sessions();
+        }
+
         let running = self.engine.is_running();
         let mut toggle_running = false;
 
@@ -475,6 +486,7 @@ impl eframe::App for SonixxApp {
         let source_count = self.engine.sources().len();
         let engine_error = self.engine.error();
         let master_peak = self.engine.master_peak();
+        let system_peak = self.system_peak;
         let vb_installed = self.vb_cable_installed;
 
         egui::Panel::right("output")
@@ -540,6 +552,13 @@ impl eframe::App for SonixxApp {
                         });
                         ui.add_space(6.0);
                         theme::meter(ui, if master_muted { 0.0 } else { master_peak }, 8.0);
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("Atividade do PC (detector)")
+                                .size(10.0)
+                                .color(MUTED),
+                        );
+                        theme::meter(ui, system_peak, 6.0);
                         ui.add_space(8.0);
                         ui.add_enabled(false, egui::Checkbox::new(&mut monitor, "Monitor mix"))
                             .on_disabled_hover_text("Monitor mix entra na próxima fase.");
@@ -752,7 +771,8 @@ impl eframe::App for SonixxApp {
 
         let running = self.engine.is_running();
         let mut tab = self.tab;
-        let selected_app_count = self.selected_apps.len();
+        let detected_sessions = self.sessions.clone();
+        let detected_app_count = detected_sessions.len();
         let sources: Vec<SourceControl> = self.engine.sources().to_vec();
 
         egui::CentralPanel::default()
@@ -788,7 +808,7 @@ impl eframe::App for SonixxApp {
                             .filter(|source| source.kind == SourceKind::App)
                             .count()
                     } else {
-                        selected_app_count
+                        detected_app_count
                     };
                     ui.selectable_value(&mut tab, Tab::Apps, format!("Aplicativos ({app_count})"));
                     ui.selectable_value(
@@ -809,10 +829,23 @@ impl eframe::App for SonixxApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if !running {
-                            empty_state(
-                                ui,
-                                "A engine está parada.\nEscolha a saída e a fonte de áudio do sistema e clique em Iniciar.",
-                            );
+                            if tab == Tab::Apps {
+                                if detected_sessions.is_empty() {
+                                    empty_state(
+                                        ui,
+                                        "Nenhum aplicativo com sessão de áudio.\nAbra um player e toque algo — o detector lê o medidor de cada sessão.",
+                                    );
+                                } else {
+                                    for session in &detected_sessions {
+                                        detected_session_card(ui, session);
+                                    }
+                                }
+                            } else {
+                                empty_state(
+                                    ui,
+                                    "A engine está parada.\nEscolha a saída e a fonte de áudio do sistema e clique em Iniciar.",
+                                );
+                            }
                             return;
                         }
                         let filtered: Vec<&SourceControl> = sources
@@ -872,24 +905,66 @@ fn device_combo(ui: &mut egui::Ui, salt: &str, selected: &mut String, devices: &
         });
 }
 
+fn session_label(session: &AudioSession) -> String {
+    let activity = if session.peak > 0.005 {
+        " • tocando"
+    } else {
+        ""
+    };
+    format!("{} (PID {}){activity}", session.name, session.pid)
+}
+
 fn session_combo(ui: &mut egui::Ui, salt: &str, selected: &mut u32, sessions: &[AudioSession]) {
     let current = sessions
         .iter()
         .find(|session| session.pid == *selected)
-        .map(|session| format!("{} (PID {})", session.name, session.pid))
+        .map(session_label)
         .unwrap_or_else(|| "Selecionar...".to_string());
     egui::ComboBox::from_id_salt(salt)
         .selected_text(current)
         .width(ui.available_width())
         .show_ui(ui, |ui| {
             for session in sessions {
-                ui.selectable_value(
-                    selected,
-                    session.pid,
-                    format!("{} (PID {})", session.name, session.pid),
-                );
+                ui.selectable_value(selected, session.pid, session_label(session));
             }
         });
+}
+
+fn detected_session_card(ui: &mut egui::Ui, session: &AudioSession) {
+    theme::card_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
+            ui.painter().circle_filled(rect.center(), 17.0, ACCENT_SOFT);
+            let initial = session.name.chars().next().unwrap_or('?').to_string();
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                initial,
+                egui::FontId::proportional(15.0),
+                ACCENT,
+            );
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(session.name.as_str()).strong().size(14.0));
+                ui.label(
+                    RichText::new(format!("Sessão de áudio · PID {}", session.pid))
+                        .size(11.0)
+                        .color(MUTED),
+                );
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (text, color) = if session.peak > 0.005 {
+                    ("tocando", GREEN)
+                } else {
+                    ("silencioso", MUTED)
+                };
+                ui.label(RichText::new(text).size(11.0).color(color));
+            });
+        });
+        ui.add_space(4.0);
+        theme::meter(ui, session.peak, 6.0);
+    });
 }
 
 fn sounds_dir() -> PathBuf {
