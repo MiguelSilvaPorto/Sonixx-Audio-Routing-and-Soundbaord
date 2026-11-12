@@ -48,6 +48,8 @@ pub struct SonixxApp {
     chrome_bridge: Option<ChromeBridge>,
     chrome_tabs: Vec<ChromeTab>,
     bridge_error: Option<String>,
+    activity_history: Vec<f32>,
+    last_meter_refresh: f64,
 }
 
 impl SonixxApp {
@@ -88,6 +90,8 @@ impl SonixxApp {
             chrome_bridge,
             chrome_tabs: Vec::new(),
             bridge_error,
+            activity_history: Vec::new(),
+            last_meter_refresh: 0.0,
         };
         app.reload_devices();
         app.refresh_sounds();
@@ -312,6 +316,15 @@ impl eframe::App for SonixxApp {
                 self.chrome_tabs = bridge.tabs();
             }
         }
+        if now - self.last_meter_refresh >= 0.08 {
+            self.last_meter_refresh = now;
+            let peak = default_output_peak().unwrap_or(0.0);
+            self.system_peak = peak;
+            self.activity_history.push(peak);
+            if self.activity_history.len() > 120 {
+                self.activity_history.remove(0);
+            }
+        }
 
         let running = self.engine.is_running();
         let mut toggle_running = false;
@@ -416,6 +429,15 @@ impl eframe::App for SonixxApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("SOUNDBOARD").size(11.0).strong().color(MUTED));
                     if sounds.is_empty() {
+                        if ui
+                            .add_sized(
+                                [170.0, 34.0],
+                                egui::Button::new("+ Adicionar sons").fill(ACCENT_SOFT),
+                            )
+                            .clicked()
+                        {
+                            open_sounds = true;
+                        }
                         ui.label(
                             RichText::new("Coloque arquivos .wav/.mp3 na pasta sounds/.")
                                 .size(11.0)
@@ -427,7 +449,8 @@ impl eframe::App for SonixxApp {
                                 .add_enabled(
                                     soundboard_running,
                                     egui::Button::new(sound.name.as_str())
-                                        .min_size(egui::vec2(104.0, 30.0)),
+                                        .fill(CARD_HOVER)
+                                        .min_size(egui::vec2(104.0, 34.0)),
                                 )
                                 .on_disabled_hover_text("Inicie a engine para tocar o soundboard.")
                                 .clicked()
@@ -454,8 +477,7 @@ impl eframe::App for SonixxApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Volume").size(11.0).color(MUTED));
-                    ui.spacing_mut().slider_width = 140.0;
-                    ui.add(egui::Slider::new(&mut soundboard_volume, 0.0..=2.0).show_value(false));
+                    theme::accent_slider(ui, &mut soundboard_volume, 0.0, 2.0, 140.0);
                     ui.label(
                         RichText::new(format!("{:.0}%", soundboard_volume * 100.0))
                             .size(11.0)
@@ -514,12 +536,14 @@ impl eframe::App for SonixxApp {
         let mut remove_mic = None;
         let mut save = false;
         let mut reload = false;
+        let mut open_driver = false;
         let running = self.engine.is_running();
         let output_rate = self.engine.output_rate();
         let source_count = self.engine.sources().len();
         let engine_error = self.engine.error();
         let master_peak = self.engine.master_peak();
         let system_peak = self.system_peak;
+        let activity_history = self.activity_history.clone();
         let vb_installed = self.vb_cable_installed;
 
         egui::Panel::right("output")
@@ -546,6 +570,17 @@ impl eframe::App for SonixxApp {
                                 .size(10.0)
                                 .color(AMBER),
                             );
+                            let driver_width = ui.available_width();
+                            if ui
+                                .add_sized(
+                                    [driver_width, 28.0],
+                                    egui::Button::new("Abrir instalador do VB-Cable")
+                                        .fill(ACCENT_SOFT),
+                                )
+                                .clicked()
+                            {
+                                open_driver = true;
+                            }
                         }
 
                         ui.add_space(10.0);
@@ -560,8 +595,7 @@ impl eframe::App for SonixxApp {
                         ui.add_space(12.0);
                         ui.label(RichText::new("Volume máster").size(11.0).color(MUTED));
                         let slider_width = (ui.available_width() - 8.0).max(80.0);
-                        ui.spacing_mut().slider_width = slider_width;
-                        ui.add(egui::Slider::new(&mut master_volume, 0.0..=2.0).show_value(false));
+                        theme::accent_slider(ui, &mut master_volume, 0.0, 2.0, slider_width);
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(format!("{:.0}%", master_volume * 100.0))
@@ -586,12 +620,24 @@ impl eframe::App for SonixxApp {
                         ui.add_space(6.0);
                         theme::meter(ui, if master_muted { 0.0 } else { master_peak }, 8.0);
                         ui.add_space(8.0);
-                        ui.label(
-                            RichText::new("Atividade do PC (detector)")
-                                .size(10.0)
-                                .color(MUTED),
-                        );
-                        theme::meter(ui, system_peak, 6.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Atividade do PC (detector)")
+                                    .size(10.0)
+                                    .color(MUTED),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(format!("{:.0}%", system_peak * 100.0))
+                                            .size(10.0)
+                                            .color(MUTED),
+                                    );
+                                },
+                            );
+                        });
+                        theme::sparkline(ui, &activity_history, 46.0);
                         ui.add_space(8.0);
                         ui.add_enabled(false, egui::Checkbox::new(&mut monitor, "Monitor mix"))
                             .on_disabled_hover_text("Monitor mix entra na próxima fase.");
@@ -801,6 +847,11 @@ impl eframe::App for SonixxApp {
         if reload {
             self.reload_devices();
         }
+        if open_driver {
+            let _ = std::process::Command::new("explorer")
+                .arg(driver_zip_path())
+                .spawn();
+        }
 
         let running = self.engine.is_running();
         let mut tab = self.tab;
@@ -813,6 +864,7 @@ impl eframe::App for SonixxApp {
             .map(|bridge| bridge.port())
             .unwrap_or(37_645);
         let mut open_extension = false;
+        let mut add_from_card: Option<AudioSession> = None;
         let has_chrome = detected_sessions.iter().any(|session| {
             session
                 .exe
@@ -973,7 +1025,9 @@ impl eframe::App for SonixxApp {
                                     );
                                 } else {
                                     for (session, icon) in visible {
-                                        detected_session_card(ui, session, icon.as_ref());
+                                        if detected_session_card(ui, session, icon.as_ref()) {
+                                            add_from_card = Some(session.clone());
+                                        }
                                     }
                                 }
                             } else {
@@ -1018,6 +1072,15 @@ impl eframe::App for SonixxApp {
 
         self.tab = tab;
         self.show_silent = show_silent;
+        if let Some(session) = add_from_card {
+            if !self
+                .selected_apps
+                .iter()
+                .any(|selected| selected.session_id == session.session_id)
+            {
+                self.selected_apps.push(session);
+            }
+        }
         if open_extension {
             let _ = std::process::Command::new("explorer")
                 .arg(chrome_extension_dir())
@@ -1096,7 +1159,8 @@ fn detected_session_card(
     ui: &mut egui::Ui,
     session: &AudioSession,
     icon: Option<&egui::TextureHandle>,
-) {
+) -> bool {
+    let mut add = false;
     theme::card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -1111,6 +1175,16 @@ fn detected_session_card(
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_sized(
+                        [96.0, 24.0],
+                        egui::Button::new("+ Mixagem").fill(ACCENT_SOFT),
+                    )
+                    .on_hover_text("Adicionar esta fonte à mixagem")
+                    .clicked()
+                {
+                    add = true;
+                }
                 let (text, color) = if session.peak > 0.005 {
                     ("tocando", GREEN)
                 } else {
@@ -1122,6 +1196,26 @@ fn detected_session_card(
         ui.add_space(4.0);
         theme::meter(ui, session.peak, 6.0);
     });
+    add
+}
+
+fn driver_zip_path() -> PathBuf {
+    let name = "VBCABLE_Driver_Pack45.zip";
+    if let Ok(current) = std::env::current_dir() {
+        let path = current.join(name);
+        if path.exists() {
+            return path;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let path = parent.join(name);
+            if path.exists() {
+                return path;
+            }
+        }
+    }
+    PathBuf::from(name)
 }
 
 fn chrome_extension_dir() -> PathBuf {
@@ -1276,11 +1370,7 @@ fn source_card(ui: &mut egui::Ui, source: &SourceControl, icon: Option<&egui::Te
         ui.add_space(6.0);
         let mut volume = source.volume();
         ui.horizontal(|ui| {
-            ui.spacing_mut().slider_width = 190.0;
-            if ui
-                .add(egui::Slider::new(&mut volume, 0.0..=2.0).show_value(false))
-                .changed()
-            {
+            if theme::accent_slider(ui, &mut volume, 0.0, 2.0, 190.0) {
                 source.set_volume(volume);
             }
             ui.label(

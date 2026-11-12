@@ -19,6 +19,9 @@ Implementado:
   (`IAudioMeterInformation`), sem captura e sem driver.
 - **Ícones reais** extraídos do executável de cada aplicativo (Shell do Windows),
   com filtro de sessões de microfone e de processos do sistema.
+- **UI visual e interativa**: sliders com trilha/preenchimento, gráfico de
+  atividade em tempo real, ações rápidas “+ Mixagem”, botão do instalador
+  VB-Cable e tiles do soundboard.
 - **Abas do Chrome** via extensão opcional (`chrome-extension/`): títulos e
   detecção das abas audíveis, sem depender de driver.
 - Captura por aplicativo via **process loopback WASAPI** nativo, sem DLL externa.

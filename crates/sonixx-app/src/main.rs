@@ -12,8 +12,8 @@ fn main() -> eframe::Result<()> {
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
             .with_title("Sonixx")
-            .with_inner_size([1120.0, 720.0])
-            .with_min_inner_size([900.0, 580.0])
+            .with_inner_size([1180.0, 800.0])
+            .with_min_inner_size([980.0, 640.0])
             .with_icon(icon),
         ..Default::default()
     };
