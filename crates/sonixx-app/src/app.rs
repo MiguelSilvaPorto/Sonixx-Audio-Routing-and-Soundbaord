@@ -2,8 +2,9 @@ use crate::icons;
 use crate::theme::{self, *};
 use eframe::egui::{self, Color32, RichText};
 use sonixx_core::audio::{
-    default_device, default_output_peak, list_audio_sessions, list_devices, AppSource, AudioDevice,
-    AudioSession, DeviceFlow, Engine, EngineConfig, SourceControl, SourceKind,
+    default_device, default_output_peak, list_audio_sessions, list_devices, set_sessions_muted,
+    set_sessions_volume, AppSource, AudioDevice, AudioSession, DeviceFlow, Engine, EngineConfig,
+    SourceControl, SourceKind,
 };
 use sonixx_core::chrome_bridge::{ChromeBridge, ChromeTab};
 use sonixx_core::{MicSelection, Settings, APP_VERSION};
@@ -16,6 +17,12 @@ enum Tab {
     Apps,
     Chrome,
     Mics,
+}
+
+enum DetectAction {
+    Add,
+    Volume(f32),
+    Mute(bool),
 }
 
 #[derive(Clone)]
@@ -282,6 +289,47 @@ impl SonixxApp {
         let texture = ctx.load_texture(exe.to_string(), image, egui::TextureOptions::LINEAR);
         self.icons.insert(exe.to_string(), texture.clone());
         Some(texture)
+    }
+
+    fn apply_session_volume(&mut self, session: &AudioSession, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        match set_sessions_volume(&session.pids, volume) {
+            Ok(()) => {
+                if let Some(current) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|current| current.key == session.key)
+                {
+                    current.volume = volume;
+                }
+                self.status = format!("Volume de {}: {:.0}%", session.name, volume * 100.0);
+            }
+            Err(error) => {
+                self.status = format!("Falha ao ajustar o volume de {}: {error:#}", session.name);
+            }
+        }
+    }
+
+    fn apply_session_mute(&mut self, session: &AudioSession, muted: bool) {
+        match set_sessions_muted(&session.pids, muted) {
+            Ok(()) => {
+                if let Some(current) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|current| current.key == session.key)
+                {
+                    current.muted = muted;
+                }
+                self.status = format!(
+                    "{}: {}",
+                    session.name,
+                    if muted { "mudo" } else { "som ativado" }
+                );
+            }
+            Err(error) => {
+                self.status = format!("Falha ao alterar o mute de {}: {error:#}", session.name);
+            }
+        }
     }
 
     fn save_settings(&mut self) {
@@ -864,7 +912,7 @@ impl eframe::App for SonixxApp {
             .map(|bridge| bridge.port())
             .unwrap_or(37_645);
         let mut open_extension = false;
-        let mut add_from_card: Option<AudioSession> = None;
+        let mut card_action: Option<(AudioSession, DetectAction)> = None;
         let has_chrome = detected_sessions.iter().any(|session| {
             session
                 .exe
@@ -972,13 +1020,22 @@ impl eframe::App for SonixxApp {
                         });
                     }
                 });
-                if tab == Tab::Apps && has_chrome {
+                if tab == Tab::Apps {
+                    if has_chrome {
+                        ui.label(
+                            RichText::new(
+                                "O Windows expõe o Chrome como uma sessão única; abas não são separadas pelo WASAPI.",
+                            )
+                            .size(10.0)
+                            .color(AMBER),
+                        );
+                    }
                     ui.label(
                         RichText::new(
-                            "O Windows expõe o Chrome como uma sessão única; abas não são separadas pelo WASAPI.",
+                            "Volume do app ajusta o volume do Windows; + Mixagem adiciona a fonte à mixagem do Sonixx.",
                         )
                         .size(10.0)
-                        .color(AMBER),
+                        .color(MUTED),
                     );
                 }
                 ui.add_space(8.0);
@@ -1025,8 +1082,10 @@ impl eframe::App for SonixxApp {
                                     );
                                 } else {
                                     for (session, icon) in visible {
-                                        if detected_session_card(ui, session, icon.as_ref()) {
-                                            add_from_card = Some(session.clone());
+                                        if let Some(action) =
+                                            detected_session_card(ui, session, icon.as_ref())
+                                        {
+                                            card_action = Some((session.clone(), action));
                                         }
                                     }
                                 }
@@ -1072,13 +1131,19 @@ impl eframe::App for SonixxApp {
 
         self.tab = tab;
         self.show_silent = show_silent;
-        if let Some(session) = add_from_card {
-            if !self
-                .selected_apps
-                .iter()
-                .any(|selected| selected.key == session.key)
-            {
-                self.selected_apps.push(session);
+        if let Some((session, action)) = card_action {
+            match action {
+                DetectAction::Add => {
+                    if !self
+                        .selected_apps
+                        .iter()
+                        .any(|selected| selected.key == session.key)
+                    {
+                        self.selected_apps.push(session);
+                    }
+                }
+                DetectAction::Volume(volume) => self.apply_session_volume(&session, volume),
+                DetectAction::Mute(muted) => self.apply_session_mute(&session, muted),
             }
         }
         if open_extension {
@@ -1167,8 +1232,8 @@ fn detected_session_card(
     ui: &mut egui::Ui,
     session: &AudioSession,
     icon: Option<&egui::TextureHandle>,
-) -> bool {
-    let mut add = false;
+) -> Option<DetectAction> {
+    let mut action = None;
     theme::card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -1192,7 +1257,7 @@ fn detected_session_card(
                     .on_hover_text("Adicionar esta fonte à mixagem")
                     .clicked()
                 {
-                    add = true;
+                    action = Some(DetectAction::Add);
                 }
                 let (text, color) = if session.peak > 0.005 {
                     ("tocando", GREEN)
@@ -1202,10 +1267,32 @@ fn detected_session_card(
                 ui.label(RichText::new(text).size(11.0).color(color));
             });
         });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Volume do app").size(10.0).color(MUTED));
+            let mut volume = session.volume.clamp(0.0, 1.0);
+            if theme::accent_slider(ui, &mut volume, 0.0, 1.0, 180.0) {
+                action = Some(DetectAction::Volume(volume));
+            }
+            ui.label(
+                RichText::new(format!("{:.0}%", volume * 100.0))
+                    .size(11.0)
+                    .color(MUTED),
+            );
+            if ui
+                .add_sized(
+                    [58.0, 24.0],
+                    egui::Button::new(if session.muted { "Mudo" } else { "Som" }),
+                )
+                .clicked()
+            {
+                action = Some(DetectAction::Mute(!session.muted));
+            }
+        });
         ui.add_space(4.0);
         theme::meter(ui, session.peak, 6.0);
     });
-    add
+    action
 }
 
 fn driver_zip_path() -> PathBuf {

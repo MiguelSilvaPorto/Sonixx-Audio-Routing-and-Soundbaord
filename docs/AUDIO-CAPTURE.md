@@ -128,6 +128,18 @@ silencioso e sem pai identificável é ocultado. A captura por aplicativo usa o
 PID raiz com `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`, então também
 inclui os filhos (WebView2) do app.
 
+## Volume e mute por aplicativo
+
+Cada card da aba **Aplicativos** tem um slider e um botão de mute que usam
+`ISimpleAudioVolume` nas sessões daquele processo. Isso altera o volume do app
+no **Windows** (o mesmo controle do mixer de volume do sistema) e funciona sem
+iniciar a engine.
+
+O botão **+ Mixagem** é outra coisa: ele adiciona a fonte ao mixer do Sonixx. O
+volume da mixagem aparece no card da fonte depois que a engine é iniciada. Para
+as sessões agrupadas (Teams com duas sessões, WebView2 sob o app pai), o volume
+é aplicado a todos os PIDs do grupo.
+
 ## Abas do Chrome
 
 O dump de sessões mostra o Chrome como **uma única sessão**:

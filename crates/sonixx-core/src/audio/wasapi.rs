@@ -12,8 +12,8 @@ use windows::Win32::Media::Audio::{
     IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
     IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
     IAudioRenderClient, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2,
-    IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT,
-    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+    IMMDeviceCollection, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
     AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, AUDIOCLIENT_ACTIVATION_PARAMS,
     AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
@@ -438,6 +438,10 @@ pub struct AudioSession {
     pub peak: f32,
     pub exe: Option<String>,
     pub sessions: usize,
+    pub volume: f32,
+    pub muted: bool,
+    /// Actual session PIDs (root + helper children) used to apply volume.
+    pub pids: Vec<u32>,
 }
 
 fn process_exe(pid: u32) -> Option<String> {
@@ -664,6 +668,16 @@ pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
             .ok()
             .and_then(|meter| unsafe { meter.GetPeakValue().ok() })
             .unwrap_or(0.0);
+        let simple = control.cast::<ISimpleAudioVolume>().ok();
+        let volume = simple
+            .as_ref()
+            .and_then(|volume| unsafe { volume.GetMasterVolume().ok() })
+            .unwrap_or(1.0);
+        let muted = simple
+            .as_ref()
+            .and_then(|volume| unsafe { volume.GetMute().ok() })
+            .map(|muted| muted.as_bool())
+            .unwrap_or(false);
 
         // A silent WebView2/crashpad helper is not an app the user opened; its
         // parent app (Teams, OpenCode, ...) will represent it when it has audio.
@@ -691,9 +705,19 @@ pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
             peak: 0.0,
             exe: root_exe.clone(),
             sessions: 0,
+            volume,
+            muted,
+            pids: Vec::new(),
         });
+        if entry.sessions == 0 {
+            entry.volume = volume;
+            entry.muted = muted;
+        }
         entry.peak = entry.peak.max(peak);
         entry.sessions += 1;
+        if !entry.pids.contains(&pid) {
+            entry.pids.push(pid);
+        }
         if entry.name.trim().is_empty() || entry.name.to_lowercase().ends_with(".exe") {
             entry.name = display_name;
         }
@@ -705,6 +729,93 @@ pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
     let mut found: Vec<AudioSession> = groups.into_values().collect();
     found.sort_by_key(|session| session.name.to_lowercase());
     Ok(found)
+}
+
+/// Sets the Windows session volume for the given process IDs.
+pub fn set_sessions_volume(pids: &[u32], volume: f32) -> Result<()> {
+    if pids.is_empty() {
+        return Ok(());
+    }
+    let _com = ComGuard::new();
+    let enumerator = enumerator()?;
+    let device = unsafe {
+        enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .context("failed to open the default playback device")?
+    };
+    let manager: IAudioSessionManager2 = unsafe {
+        device
+            .Activate(CLSCTX_ALL, None)
+            .context("failed to open the audio session manager")?
+    };
+    let sessions = unsafe {
+        manager
+            .GetSessionEnumerator()
+            .context("failed to enumerate audio sessions")?
+    };
+    let count = unsafe { sessions.GetCount().unwrap_or(0) };
+    let volume = volume.clamp(0.0, 1.0);
+    for index in 0..count {
+        let Ok(control) = (unsafe { sessions.GetSession(index) }) else {
+            continue;
+        };
+        let Ok(control2) = control.cast::<IAudioSessionControl2>() else {
+            continue;
+        };
+        let Ok(pid) = (unsafe { control2.GetProcessId() }) else {
+            continue;
+        };
+        if !pids.contains(&pid) {
+            continue;
+        }
+        if let Ok(audio_volume) = control.cast::<ISimpleAudioVolume>() {
+            let _ = unsafe { audio_volume.SetMasterVolume(volume, std::ptr::null()) };
+        }
+    }
+    Ok(())
+}
+
+/// Mutes/unmutes the Windows sessions for the given process IDs.
+pub fn set_sessions_muted(pids: &[u32], muted: bool) -> Result<()> {
+    if pids.is_empty() {
+        return Ok(());
+    }
+    let _com = ComGuard::new();
+    let enumerator = enumerator()?;
+    let device = unsafe {
+        enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .context("failed to open the default playback device")?
+    };
+    let manager: IAudioSessionManager2 = unsafe {
+        device
+            .Activate(CLSCTX_ALL, None)
+            .context("failed to open the audio session manager")?
+    };
+    let sessions = unsafe {
+        manager
+            .GetSessionEnumerator()
+            .context("failed to enumerate audio sessions")?
+    };
+    let count = unsafe { sessions.GetCount().unwrap_or(0) };
+    for index in 0..count {
+        let Ok(control) = (unsafe { sessions.GetSession(index) }) else {
+            continue;
+        };
+        let Ok(control2) = control.cast::<IAudioSessionControl2>() else {
+            continue;
+        };
+        let Ok(pid) = (unsafe { control2.GetProcessId() }) else {
+            continue;
+        };
+        if !pids.contains(&pid) {
+            continue;
+        }
+        if let Ok(audio_volume) = control.cast::<ISimpleAudioVolume>() {
+            let _ = unsafe { audio_volume.SetMute(muted, std::ptr::null()) };
+        }
+    }
+    Ok(())
 }
 
 fn canonical_capture_format() -> (AudioFormat, WAVEFORMATEXTENSIBLE) {

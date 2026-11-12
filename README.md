@@ -22,6 +22,9 @@ Implementado:
 - **Sessões agrupadas por aplicativo**: duas sessões do Teams viram um cartão
   “2 sessões”; WebView2/crashpad são mapeados ao app pai em vez de aparecerem
   como aplicativos separados.
+- **Volume e mute individuais por app** direto nos cards, via
+  `ISimpleAudioVolume` do Windows — funciona mesmo com a engine parada.
+  O botão “+ Mixagem” é separado e adiciona a fonte ao mixer do Sonixx.
 - **UI visual e interativa**: sliders com trilha/preenchimento, gráfico de
   atividade em tempo real, ações rápidas “+ Mixagem”, botão do instalador
   VB-Cable e tiles do soundboard.
