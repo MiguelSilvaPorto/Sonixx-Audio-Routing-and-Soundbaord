@@ -20,6 +20,7 @@ fn main() -> Result<()> {
     engine.start(EngineConfig {
         output_device: output,
         loopback_device: loopback,
+        app_sources: Vec::new(),
         mic_devices: Vec::new(),
         master_volume: 0.05,
         master_muted: false,

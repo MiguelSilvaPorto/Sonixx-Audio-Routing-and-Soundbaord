@@ -1,21 +1,35 @@
 use anyhow::{bail, Context, Result};
-use windows::core::GUID;
+use std::mem::{size_of, ManuallyDrop};
+use std::ops::Deref;
+use std::pin::Pin;
+use std::sync::{Arc, Condvar, Mutex};
+use windows::core::{implement, IUnknown, Interface, Ref, GUID};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eRender, EDataFlow, IAudioCaptureClient, IAudioClient, IAudioRenderClient,
+    eCapture, eConsole, eRender, ActivateAudioInterfaceAsync, EDataFlow,
+    IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+    IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
+    IAudioRenderClient, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2,
     IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
-    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
-    WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0,
+    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, AUDIOCLIENT_ACTIVATION_PARAMS,
+    AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, DEVICE_STATE_ACTIVE,
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+    WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0,
 };
-use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
+use windows::Win32::System::Com::StructuredStorage::{
+    PropVariantClear, PropVariantToStringAlloc, PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0,
+    PROPVARIANT_0_0_0,
+};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, BLOB, CLSCTX_ALL,
     COINIT_MULTITHREADED, STGM_READ,
 };
 use windows::Win32::System::Threading::CreateEventW;
+use windows::Win32::System::Variant::VT_BLOB;
 
 const WAVE_FORMAT_PCM: u16 = 1;
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
@@ -368,6 +382,188 @@ fn write_sample(out: &mut [u8], offset: usize, value: f32, bits: u16, is_float: 
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioSession {
+    pub pid: u32,
+    pub name: String,
+}
+
+/// Lists applications that currently have an audio session on the default
+/// playback device. This is what the UI shows in the "Aplicativos" tab.
+pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
+    let _com = ComGuard::new();
+    let enumerator = enumerator()?;
+    let device = unsafe {
+        enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .context("failed to open the default playback device")?
+    };
+    let manager: IAudioSessionManager2 = unsafe {
+        device
+            .Activate(CLSCTX_ALL, None)
+            .context("failed to open the audio session manager")?
+    };
+    let sessions: IAudioSessionEnumerator = unsafe {
+        manager
+            .GetSessionEnumerator()
+            .context("failed to enumerate audio sessions")?
+    };
+    let count = unsafe {
+        sessions
+            .GetCount()
+            .context("failed to count audio sessions")?
+    };
+
+    let system = sysinfo::System::new_all().ok();
+    let mut found = Vec::new();
+    for index in 0..count {
+        let Ok(control) = (unsafe { sessions.GetSession(index) }) else {
+            continue;
+        };
+        let Ok(control2) = control.cast::<IAudioSessionControl2>() else {
+            continue;
+        };
+        if unsafe { control2.IsSystemSoundsSession().0 } == 0 {
+            continue;
+        }
+        let Ok(pid) = (unsafe { control2.GetProcessId() }) else {
+            continue;
+        };
+        if pid == 0 || pid == std::process::id() {
+            continue;
+        }
+        let display = unsafe {
+            control
+                .GetDisplayName()
+                .ok()
+                .map(|text| {
+                    let value = text.to_string().unwrap_or_default();
+                    CoTaskMemFree(Some(text.0 as *const core::ffi::c_void));
+                    value
+                })
+                .unwrap_or_default()
+        };
+        let process_name = system
+            .as_ref()
+            .and_then(|system| system.process(sysinfo::Pid::from_u32(pid)))
+            .map(|process| process.name().to_string_lossy().to_string())
+            .unwrap_or_default();
+        let name = if display.trim().is_empty() {
+            process_name
+        } else {
+            display
+        };
+        if name.trim().is_empty() {
+            continue;
+        }
+        found.push(AudioSession { pid, name });
+    }
+    found.sort_by_key(|session| session.name.to_lowercase());
+    found.dedup_by_key(|session| session.pid);
+    Ok(found)
+}
+
+fn canonical_capture_format() -> (AudioFormat, WAVEFORMATEXTENSIBLE) {
+    let sample_rate = 48_000u32;
+    let channels = 2u16;
+    let block_align = 8u16;
+    let format = AudioFormat {
+        sample_rate,
+        channels,
+        block_align,
+        bits_per_sample: 32,
+        is_float: true,
+    };
+    let ext = WAVEFORMATEXTENSIBLE {
+        Format: WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_EXTENSIBLE,
+            nChannels: channels,
+            nSamplesPerSec: sample_rate,
+            nAvgBytesPerSec: sample_rate * block_align as u32,
+            nBlockAlign: block_align,
+            wBitsPerSample: 32,
+            cbSize: 22,
+        },
+        Samples: WAVEFORMATEXTENSIBLE_0 {
+            wValidBitsPerSample: 32,
+        },
+        dwChannelMask: 0x3,
+        SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
+    };
+    (format, ext)
+}
+
+fn initialize_capture_client(
+    client: &IAudioClient,
+    loopback: bool,
+) -> Result<(AudioFormat, HANDLE)> {
+    let (format, ext) = canonical_capture_format();
+    let mut default_period = 0i64;
+    let mut min_period = 0i64;
+    unsafe {
+        let _ = client.GetDevicePeriod(Some(&mut default_period), Some(&mut min_period));
+    }
+    let buffer_duration = if min_period > 0 { min_period } else { 0 };
+    let flags = (if loopback {
+        AUDCLNT_STREAMFLAGS_LOOPBACK
+    } else {
+        0
+    }) | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+        | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+        | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    let event = unsafe { CreateEventW(None, false, false, windows::core::PCWSTR::null()) }
+        .context("failed to create the capture event")?;
+    let ext_ptr = (&ext as *const WAVEFORMATEXTENSIBLE).cast::<WAVEFORMATEX>();
+    let init = unsafe {
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            flags,
+            buffer_duration,
+            0,
+            ext_ptr,
+            None,
+        )
+    };
+    if let Err(error) = init {
+        unsafe {
+            let _ = CloseHandle(event);
+        }
+        return Err(error).context("failed to initialize the WASAPI capture stream");
+    }
+    if let Err(error) = unsafe { client.SetEventHandle(event) } {
+        unsafe {
+            let _ = CloseHandle(event);
+        }
+        return Err(error).context("failed to attach the capture event");
+    }
+    Ok((format, event))
+}
+
+#[implement(IActivateAudioInterfaceCompletionHandler)]
+struct ActivationHandler(Arc<(Mutex<bool>, Condvar)>);
+
+impl ActivationHandler {
+    fn new(setup: Arc<(Mutex<bool>, Condvar)>) -> Self {
+        Self(setup)
+    }
+}
+
+impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
+    fn ActivateCompleted(
+        &self,
+        _activateoperation: Ref<IActivateAudioInterfaceAsyncOperation>,
+    ) -> windows::core::Result<()> {
+        let (lock, cvar) = &*self.0;
+        let mut completed = lock
+            .lock()
+            .map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+        *completed = true;
+        drop(completed);
+        cvar.notify_one();
+        Ok(())
+    }
+}
+
 pub struct CaptureStream {
     client: IAudioClient,
     capture: IAudioCaptureClient,
@@ -391,73 +587,7 @@ impl CaptureStream {
                 .Activate(CLSCTX_ALL, None)
                 .context("failed to activate the WASAPI capture client")?
         };
-        // Ask WASAPI to convert everything to a single canonical format. This
-        // is the same approach used by the reference wasapi crate: the device
-        // mix format is not passed directly, which some drivers reject.
-        let sample_rate = 48_000u32;
-        let channels = 2u16;
-        let block_align = 8u16;
-        let format = AudioFormat {
-            sample_rate,
-            channels,
-            block_align,
-            bits_per_sample: 32,
-            is_float: true,
-        };
-        let ext = WAVEFORMATEXTENSIBLE {
-            Format: WAVEFORMATEX {
-                wFormatTag: WAVE_FORMAT_EXTENSIBLE,
-                nChannels: channels,
-                nSamplesPerSec: sample_rate,
-                nAvgBytesPerSec: sample_rate * block_align as u32,
-                nBlockAlign: block_align,
-                wBitsPerSample: 32,
-                cbSize: 22,
-            },
-            Samples: WAVEFORMATEXTENSIBLE_0 {
-                wValidBitsPerSample: 32,
-            },
-            dwChannelMask: 0x3,
-            SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
-        };
-        let mut default_period = 0i64;
-        let mut min_period = 0i64;
-        unsafe {
-            let _ = client.GetDevicePeriod(Some(&mut default_period), Some(&mut min_period));
-        }
-        let buffer_duration = if min_period > 0 { min_period } else { 0 };
-        let flags = (if loopback {
-            AUDCLNT_STREAMFLAGS_LOOPBACK
-        } else {
-            0
-        }) | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-            | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-            | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
-        let event = unsafe { CreateEventW(None, false, false, windows::core::PCWSTR::null()) }
-            .context("failed to create the capture event")?;
-        let ext_ptr = (&ext as *const WAVEFORMATEXTENSIBLE).cast::<WAVEFORMATEX>();
-        let init = unsafe {
-            client.Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
-                flags,
-                buffer_duration,
-                0,
-                ext_ptr,
-                None,
-            )
-        };
-        if let Err(error) = init {
-            unsafe {
-                let _ = CloseHandle(event);
-            };
-            return Err(error).context("failed to initialize the WASAPI capture stream");
-        }
-        if let Err(error) = unsafe { client.SetEventHandle(event) } {
-            unsafe {
-                let _ = CloseHandle(event);
-            };
-            return Err(error).context("failed to attach the capture event");
-        }
+        let (format, event) = initialize_capture_client(&client, loopback)?;
 
         let capture: IAudioCaptureClient = unsafe {
             client
@@ -465,6 +595,97 @@ impl CaptureStream {
                 .context("failed to get the WASAPI capture client")?
         };
         unsafe { client.Start().context("failed to start audio capture")? };
+
+        Ok(Self {
+            client,
+            capture,
+            format,
+            event,
+            _com: com,
+        })
+    }
+
+    /// Captures only the audio of one process (and its children) using the
+    /// Windows process-loopback API.
+    pub fn open_process(process_id: u32) -> Result<Self> {
+        let com = ComGuard::new();
+        let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
+            ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+            Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+                ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                    TargetProcessId: process_id,
+                    ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+                },
+            },
+        };
+        let pinned_params = Pin::new(&mut params);
+        let raw_prop = PROPVARIANT {
+            Anonymous: PROPVARIANT_0 {
+                Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
+                    vt: VT_BLOB,
+                    wReserved1: 0,
+                    wReserved2: 0,
+                    wReserved3: 0,
+                    Anonymous: PROPVARIANT_0_0_0 {
+                        blob: BLOB {
+                            cbSize: size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                            pBlobData: std::ptr::from_mut(pinned_params.get_mut()).cast(),
+                        },
+                    },
+                }),
+            },
+        };
+        let activation_prop = ManuallyDrop::new(raw_prop);
+        let pinned_prop = Pin::new(activation_prop.deref());
+        let activation_params = Some(std::ptr::from_ref(pinned_prop.get_ref()));
+
+        let setup = Arc::new((Mutex::new(false), Condvar::new()));
+        let callback: IActivateAudioInterfaceCompletionHandler =
+            ActivationHandler::new(setup.clone()).into();
+        let operation = unsafe {
+            ActivateAudioInterfaceAsync(
+                VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+                &IAudioClient::IID,
+                activation_params,
+                &callback,
+            )
+        }
+        .context("failed to activate process loopback")?;
+
+        let (lock, cvar) = &*setup;
+        let mut completed = lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("process loopback activation lock poisoned"))?;
+        while !*completed {
+            completed = cvar
+                .wait(completed)
+                .map_err(|_| anyhow::anyhow!("process loopback activation wait failed"))?;
+        }
+        drop(completed);
+
+        let mut unknown: Option<IUnknown> = None;
+        let mut result = windows::core::HRESULT(0);
+        unsafe {
+            operation
+                .GetActivateResult(&mut result, &mut unknown)
+                .context("failed to read the process loopback activation result")?;
+        }
+        result.ok().context("process loopback activation failed")?;
+        let client: IAudioClient = unknown
+            .context("process loopback returned no audio client")?
+            .cast()
+            .context("failed to cast the process loopback client")?;
+        let (format, event) = initialize_capture_client(&client, true)?;
+        let capture: IAudioCaptureClient = unsafe {
+            client
+                .GetService()
+                .context("failed to get the process loopback capture client")?
+        };
+        unsafe {
+            client
+                .Start()
+                .context("failed to start process loopback capture")?
+        };
 
         Ok(Self {
             client,

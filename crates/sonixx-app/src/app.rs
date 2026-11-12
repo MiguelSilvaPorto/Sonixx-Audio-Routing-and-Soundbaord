@@ -1,15 +1,23 @@
 use crate::theme::{self, *};
 use eframe::egui::{self, Color32, RichText};
 use sonixx_core::audio::{
-    default_device, list_devices, AudioDevice, DeviceFlow, Engine, EngineConfig, SourceControl,
-    SourceKind,
+    default_device, list_audio_sessions, list_devices, AppSource, AudioDevice, AudioSession,
+    DeviceFlow, Engine, EngineConfig, SourceControl, SourceKind,
 };
 use sonixx_core::{MicSelection, Settings, APP_VERSION};
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     System,
+    Apps,
     Mics,
+}
+
+#[derive(Clone)]
+struct SoundEntry {
+    name: String,
+    path: PathBuf,
 }
 
 pub struct SonixxApp {
@@ -20,6 +28,10 @@ pub struct SonixxApp {
     loopback_id: String,
     mic_choice: String,
     mics: Vec<AudioDevice>,
+    sessions: Vec<AudioSession>,
+    selected_apps: Vec<AudioSession>,
+    app_choice_pid: u32,
+    sounds: Vec<SoundEntry>,
     tab: Tab,
     status: String,
     settings: Settings,
@@ -45,6 +57,10 @@ impl SonixxApp {
             loopback_id: settings.loopback_device.clone().unwrap_or_default(),
             mic_choice: String::new(),
             mics: Vec::new(),
+            sessions: Vec::new(),
+            selected_apps: Vec::new(),
+            app_choice_pid: 0,
+            sounds: Vec::new(),
             tab: Tab::System,
             status: "Selecione a saída e a fonte de áudio do sistema.".to_string(),
             monitor: settings.monitor,
@@ -52,6 +68,7 @@ impl SonixxApp {
             vb_cable_installed: false,
         };
         app.reload_devices();
+        app.refresh_sounds();
 
         if !settings.mics.is_empty() {
             app.mics = settings
@@ -129,6 +146,56 @@ impl SonixxApp {
         }
         self.mics
             .retain(|mic| self.inputs.iter().any(|device| device.id == mic.id));
+        self.refresh_sessions();
+    }
+
+    fn refresh_sessions(&mut self) {
+        self.sessions = list_audio_sessions().unwrap_or_default();
+        self.selected_apps.retain(|selected| {
+            self.sessions
+                .iter()
+                .any(|session| session.pid == selected.pid)
+        });
+        if !self
+            .sessions
+            .iter()
+            .any(|session| session.pid == self.app_choice_pid)
+        {
+            self.app_choice_pid = self
+                .sessions
+                .first()
+                .map(|session| session.pid)
+                .unwrap_or(0);
+        }
+    }
+
+    fn refresh_sounds(&mut self) {
+        let dir = sounds_dir();
+        let mut sounds = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let extension = path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_lowercase();
+                if matches!(
+                    extension.as_str(),
+                    "wav" | "mp3" | "flac" | "ogg" | "aac" | "m4a"
+                ) {
+                    sounds.push(SoundEntry {
+                        name: path
+                            .file_stem()
+                            .map(|stem| stem.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "Som".to_string()),
+                        path,
+                    });
+                }
+            }
+        }
+        sounds.sort_by_key(|sound| sound.name.to_lowercase());
+        self.sounds = sounds;
     }
 
     fn start_engine(&mut self) {
@@ -150,6 +217,14 @@ impl SonixxApp {
                 let config = EngineConfig {
                     output_device,
                     loopback_device,
+                    app_sources: self
+                        .selected_apps
+                        .iter()
+                        .map(|session| AppSource {
+                            pid: session.pid,
+                            name: session.name.clone(),
+                        })
+                        .collect(),
                     mic_devices: self.mics.clone(),
                     master_volume: self.engine.master_volume(),
                     master_muted: self.engine.master_muted(),
@@ -277,8 +352,16 @@ impl eframe::App for SonixxApp {
         } else {
             MUTED
         };
+        let sounds = self.sounds.clone();
+        let soundboard_running = self.engine.is_running();
+        let mut play_sound = None;
+        let mut refresh_sounds = false;
+        let mut open_sounds = false;
+        let mut soundboard_volume = self.engine.soundboard_volume();
+        let mut soundboard_muted = self.engine.soundboard_muted();
+
         egui::Panel::bottom("soundboard")
-            .exact_size(116.0)
+            .exact_size(142.0)
             .frame(
                 egui::Frame::new()
                     .fill(PANEL)
@@ -288,17 +371,85 @@ impl eframe::App for SonixxApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("SOUNDBOARD").size(11.0).strong().color(MUTED));
-                    for name in ["Airhorn", "Aplausos", "Risada", "Tambor"] {
-                        ui.add_enabled(
-                            false,
-                            egui::Button::new(name).min_size(egui::vec2(96.0, 30.0)),
-                        )
-                        .on_disabled_hover_text("O soundboard em Rust entra na próxima fase.");
+                    if sounds.is_empty() {
+                        ui.label(
+                            RichText::new("Coloque arquivos .wav/.mp3 na pasta sounds/.")
+                                .size(11.0)
+                                .color(MUTED),
+                        );
+                    } else {
+                        for (index, sound) in sounds.iter().take(8).enumerate() {
+                            if ui
+                                .add_enabled(
+                                    soundboard_running,
+                                    egui::Button::new(sound.name.as_str())
+                                        .min_size(egui::vec2(104.0, 30.0)),
+                                )
+                                .on_disabled_hover_text("Inicie a engine para tocar o soundboard.")
+                                .clicked()
+                            {
+                                play_sound = Some(index);
+                            }
+                        }
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_sized([140.0, 30.0], egui::Button::new("Abrir pasta"))
+                            .clicked()
+                        {
+                            open_sounds = true;
+                        }
+                        if ui
+                            .add_sized([100.0, 30.0], egui::Button::new("Atualizar"))
+                            .clicked()
+                        {
+                            refresh_sounds = true;
+                        }
+                    });
                 });
                 ui.add_space(6.0);
-                ui.label(RichText::new(status).size(11.0).color(status_color));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Volume").size(11.0).color(MUTED));
+                    ui.spacing_mut().slider_width = 140.0;
+                    ui.add(egui::Slider::new(&mut soundboard_volume, 0.0..=2.0).show_value(false));
+                    ui.label(
+                        RichText::new(format!("{:.0}%", soundboard_volume * 100.0))
+                            .size(11.0)
+                            .color(TEXT),
+                    );
+                    if ui
+                        .add_sized(
+                            [64.0, 24.0],
+                            egui::Button::new(if soundboard_muted { "Mudo" } else { "Som" }),
+                        )
+                        .clicked()
+                    {
+                        soundboard_muted = !soundboard_muted;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(status).size(11.0).color(status_color));
+                    });
+                });
             });
+
+        self.engine.set_soundboard_volume(soundboard_volume);
+        self.engine.set_soundboard_muted(soundboard_muted);
+        if let Some(index) = play_sound {
+            if let Some(sound) = self.sounds.get(index) {
+                match self.engine.play_sound(&sound.path) {
+                    Ok(()) => self.status = format!("Tocando: {}", sound.name),
+                    Err(error) => self.status = format!("Falha ao tocar {}: {error:#}", sound.name),
+                }
+            }
+        }
+        if refresh_sounds {
+            self.refresh_sounds();
+        }
+        if open_sounds {
+            let _ = std::process::Command::new("explorer")
+                .arg(sounds_dir())
+                .spawn();
+        }
 
         let outputs = &self.outputs;
         let inputs = &self.inputs;
@@ -306,6 +457,12 @@ impl eframe::App for SonixxApp {
         let mut loopback_id = self.loopback_id.clone();
         let mut mic_choice = self.mic_choice.clone();
         let mics = self.mics.clone();
+        let sessions = self.sessions.clone();
+        let selected_apps = self.selected_apps.clone();
+        let mut app_choice_pid = self.app_choice_pid;
+        let mut add_app = false;
+        let mut remove_app = None;
+        let mut refresh_apps = false;
         let mut master_volume = self.engine.master_volume();
         let mut master_muted = self.engine.master_muted();
         let mut monitor = self.monitor;
@@ -386,6 +543,56 @@ impl eframe::App for SonixxApp {
                         ui.add_space(8.0);
                         ui.add_enabled(false, egui::Checkbox::new(&mut monitor, "Monitor mix"))
                             .on_disabled_hover_text("Monitor mix entra na próxima fase.");
+                    });
+
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("APLICATIVOS").size(11.0).strong().color(MUTED));
+                    ui.add_space(4.0);
+                    theme::card_frame().show(ui, |ui| {
+                        session_combo(ui, "app-choice", &mut app_choice_pid, &sessions);
+                        let add_width = ui.available_width();
+                        if ui
+                            .add_enabled(
+                                app_choice_pid != 0,
+                                egui::Button::new("+ Adicionar aplicativo")
+                                    .min_size(egui::vec2(add_width, 28.0)),
+                            )
+                            .clicked()
+                        {
+                            add_app = true;
+                        }
+                        if sessions.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "Nenhum app tocando áudio. Abra um player e clique em Atualizar.",
+                                )
+                                .size(10.0)
+                                .color(MUTED),
+                            );
+                        }
+                        for (index, app) in selected_apps.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(app.name.as_str()).size(11.0).color(TEXT));
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add_sized([64.0, 22.0], egui::Button::new("Remover"))
+                                            .clicked()
+                                        {
+                                            remove_app = Some(index);
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                        let refresh_width = ui.available_width();
+                        if ui
+                            .add_sized([refresh_width, 24.0], egui::Button::new("Atualizar aplicativos"))
+                            .clicked()
+                        {
+                            refresh_apps = true;
+                        }
                     });
 
                     ui.add_space(12.0);
@@ -492,9 +699,31 @@ impl eframe::App for SonixxApp {
         self.loopback_id = loopback_id;
         self.mic_choice = mic_choice;
         self.mics = mics;
+        self.selected_apps = selected_apps;
+        self.app_choice_pid = app_choice_pid;
         self.monitor = monitor;
         self.engine.set_master_volume(master_volume);
         self.engine.set_master_muted(master_muted);
+        if add_app {
+            if let Some(session) = sessions
+                .iter()
+                .find(|session| session.pid == self.app_choice_pid)
+                .cloned()
+            {
+                if !self
+                    .selected_apps
+                    .iter()
+                    .any(|selected| selected.pid == session.pid)
+                {
+                    self.selected_apps.push(session);
+                }
+            }
+        }
+        if let Some(index) = remove_app {
+            if index < self.selected_apps.len() {
+                self.selected_apps.remove(index);
+            }
+        }
         if add_mic {
             if let Some(device) = inputs
                 .iter()
@@ -511,6 +740,9 @@ impl eframe::App for SonixxApp {
                 self.mics.remove(index);
             }
         }
+        if refresh_apps {
+            self.refresh_sessions();
+        }
         if save {
             self.save_settings();
         }
@@ -520,6 +752,7 @@ impl eframe::App for SonixxApp {
 
         let running = self.engine.is_running();
         let mut tab = self.tab;
+        let selected_app_count = self.selected_apps.len();
         let sources: Vec<SourceControl> = self.engine.sources().to_vec();
 
         egui::CentralPanel::default()
@@ -549,10 +782,25 @@ impl eframe::App for SonixxApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut tab, Tab::System, "Áudio do sistema");
+                    let app_count = if running {
+                        sources
+                            .iter()
+                            .filter(|source| source.kind == SourceKind::App)
+                            .count()
+                    } else {
+                        selected_app_count
+                    };
+                    ui.selectable_value(&mut tab, Tab::Apps, format!("Aplicativos ({app_count})"));
                     ui.selectable_value(
                         &mut tab,
                         Tab::Mics,
-                        format!("Microfones ({})", sources.iter().filter(|s| s.kind == SourceKind::Mic).count()),
+                        format!(
+                            "Microfones ({})",
+                            sources
+                                .iter()
+                                .filter(|source| source.kind == SourceKind::Mic)
+                                .count()
+                        ),
                     );
                 });
                 ui.add_space(8.0);
@@ -571,11 +819,23 @@ impl eframe::App for SonixxApp {
                             .iter()
                             .filter(|source| match tab {
                                 Tab::System => source.kind == SourceKind::System,
+                                Tab::Apps => source.kind == SourceKind::App,
                                 Tab::Mics => source.kind == SourceKind::Mic,
                             })
                             .collect();
                         if filtered.is_empty() {
-                            empty_state(ui, "Nenhuma fonte nesta categoria.");
+                            empty_state(
+                                ui,
+                                match tab {
+                                    Tab::Apps => {
+                                        "Nenhum aplicativo na mixagem.\nAdicione um app no painel direito e clique em Iniciar."
+                                    }
+                                    Tab::Mics => {
+                                        "Nenhum microfone na mixagem.\nAdicione um microfone no painel direito e clique em Iniciar."
+                                    }
+                                    Tab::System => "Nenhuma fonte nesta categoria.",
+                                },
+                            );
                         } else {
                             for source in filtered {
                                 source_card(ui, source);
@@ -610,6 +870,44 @@ fn device_combo(ui: &mut egui::Ui, salt: &str, selected: &mut String, devices: &
                 ui.selectable_value(selected, device.id.clone(), &device.name);
             }
         });
+}
+
+fn session_combo(ui: &mut egui::Ui, salt: &str, selected: &mut u32, sessions: &[AudioSession]) {
+    let current = sessions
+        .iter()
+        .find(|session| session.pid == *selected)
+        .map(|session| format!("{} (PID {})", session.name, session.pid))
+        .unwrap_or_else(|| "Selecionar...".to_string());
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(current)
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for session in sessions {
+                ui.selectable_value(
+                    selected,
+                    session.pid,
+                    format!("{} (PID {})", session.name, session.pid),
+                );
+            }
+        });
+}
+
+fn sounds_dir() -> PathBuf {
+    if let Ok(current) = std::env::current_dir() {
+        let dir = current.join("sounds");
+        if dir.is_dir() {
+            return dir;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let dir = parent.join("sounds");
+            if dir.is_dir() {
+                return dir;
+            }
+        }
+    }
+    PathBuf::from("sounds")
 }
 
 fn status_row(ui: &mut egui::Ui, label: &str, value: &str) {

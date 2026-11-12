@@ -150,18 +150,22 @@ do engine e envia comandos por canal; nunca bloqueia o áudio.
 - [ ] Monitor mix.
 - [ ] Testes unitários do mixer/ring buffer.
 
-### Fase 3 — Captura por processo
+### Fase 3 — Captura por processo (implementada)
 
-- Implementar process loopback WASAPI (`ActivateAudioInterfaceAsync`).
-- Testar com Chrome/Spotify/jogo.
-- Auto-exclusão do próprio processo.
+- [x] Process loopback WASAPI (`ActivateAudioInterfaceAsync` +
+      `AUDIOCLIENT_ACTIVATION_PARAMS`).
+- [x] Listagem de sessões de áudio (PID + nome) na UI.
+- [x] Mixagem da captura por aplicativo junto com sistema e microfones.
+- [ ] Validação audível em máquina com captura WASAPI liberada.
 
-### Fase 4 — Soundboard, tray e hotkeys
+### Fase 4 — Soundboard, tray e hotkeys (parcial)
 
-- Decodificação e mixagem de arquivos.
-- Hotkeys globais (mute master + soundboard).
-- Tray com restaurar/sair; fechar para a bandeja.
-- Autostart.
+- [x] Decodificação WAV/MP3/FLAC/OGG/AAC com `symphonia`.
+- [x] Mixagem de múltiplas vozes no render, volume e mute do soundboard.
+- [x] Lista de arquivos de `sounds/` e botões reais na UI.
+- [ ] Hotkeys globais (mute master + soundboard).
+- [ ] Tray com restaurar/sair; fechar para a bandeja.
+- [ ] Autostart.
 
 ### Fase 5 — Driver e paridade
 

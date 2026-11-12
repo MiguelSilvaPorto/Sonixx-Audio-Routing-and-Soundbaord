@@ -15,6 +15,8 @@ Implementado:
 - Janela nativa com `egui`/`eframe` (sem webview), tema escuro.
 - Enumeração real de dispositivos WASAPI (saída e entrada).
 - Seleção de dispositivo de saída, fonte de loopback do sistema e microfones.
+- Captura por aplicativo via **process loopback WASAPI** nativo, sem DLL externa.
+- Soundboard tocando arquivos **WAV, MP3, FLAC, OGG e AAC** pela mixagem.
 - Engine Rust com captura WASAPI, mixagem, volume máster, mute e medidores.
 - Saída WASAPI para o dispositivo escolhido (VB-Cable quando instalado).
 - Persistência de configurações em `%APPDATA%\Sonixx\settings.json`.
@@ -22,11 +24,13 @@ Implementado:
 
 Em desenvolvimento (próximas fases):
 
-- Captura por aplicativo (process loopback WASAPI).
-- Soundboard tocando arquivos de áudio.
 - Monitor mix, bandeja do sistema, atalhos globais e autostart.
 - Instalação/renomeação do VB-Cable pela interface.
 - Instalador e release portable.
+
+> Em alguns ambientes corporativos o Windows recusa a inicialização de
+> captura WASAPI (`E_INVALIDARG`) por política de segurança/driver. A captura
+> por aplicativo abre normalmente; a validação de áudio depende dessa liberação.
 
 ## Requisitos
 

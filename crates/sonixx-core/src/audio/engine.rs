@@ -1,15 +1,36 @@
 use crate::audio::wasapi::{AudioDevice, CaptureStream, RenderStream};
 use anyhow::{bail, Context, Result};
 use ringbuf::{traits::*, HeapRb};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceKind {
     System,
+    App,
     Mic,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppSource {
+    pub pid: u32,
+    pub name: String,
+}
+
+pub struct Sound {
+    pub samples: Vec<f32>,
+    pub name: String,
 }
 
 #[derive(Clone)]
@@ -85,6 +106,7 @@ impl SourceControl {
 pub struct EngineConfig {
     pub output_device: AudioDevice,
     pub loopback_device: AudioDevice,
+    pub app_sources: Vec<AppSource>,
     pub mic_devices: Vec<AudioDevice>,
     pub master_volume: f32,
     pub master_muted: bool,
@@ -96,6 +118,9 @@ pub struct Engine {
     master_muted: Arc<AtomicBool>,
     master_peak: Arc<AtomicU32>,
     output_rate: Arc<AtomicU32>,
+    soundboard_volume: Arc<AtomicU32>,
+    soundboard_muted: Arc<AtomicBool>,
+    sound_tx: Option<Sender<Arc<Sound>>>,
     sources: Vec<SourceControl>,
     handles: Vec<JoinHandle<()>>,
     error: Arc<Mutex<Option<String>>>,
@@ -115,6 +140,9 @@ impl Engine {
             master_muted: Arc::new(AtomicBool::new(false)),
             master_peak: Arc::new(AtomicU32::new(0.0f32.to_bits())),
             output_rate: Arc::new(AtomicU32::new(0)),
+            soundboard_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            soundboard_muted: Arc::new(AtomicBool::new(false)),
+            sound_tx: None,
             sources: Vec::new(),
             handles: Vec::new(),
             error: Arc::new(Mutex::new(None)),
@@ -162,6 +190,45 @@ impl Engine {
         self.error.lock().ok().and_then(|error| error.clone())
     }
 
+    pub fn soundboard_volume(&self) -> f32 {
+        f32::from_bits(self.soundboard_volume.load(Ordering::Relaxed))
+    }
+
+    pub fn set_soundboard_volume(&self, value: f32) {
+        self.soundboard_volume
+            .store(value.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn soundboard_muted(&self) -> bool {
+        self.soundboard_muted.load(Ordering::Relaxed)
+    }
+
+    pub fn set_soundboard_muted(&self, value: bool) {
+        self.soundboard_muted.store(value, Ordering::Relaxed);
+    }
+
+    /// Decodes an audio file to the engine's output rate and queues it for
+    /// playback through the mixer.
+    pub fn play_sound(&self, path: &Path) -> Result<()> {
+        let rate = self.output_rate();
+        if rate == 0 {
+            bail!("start the engine before playing soundboard files");
+        }
+        let samples = decode_audio(path, rate)?;
+        let name = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Som".to_string());
+        let sender = self
+            .sound_tx
+            .as_ref()
+            .context("the soundboard is not running")?;
+        sender
+            .send(Arc::new(Sound { samples, name }))
+            .context("the soundboard thread stopped")?;
+        Ok(())
+    }
+
     pub fn start(&mut self, config: EngineConfig) -> Result<()> {
         self.stop();
         if config.output_device.id.is_empty() {
@@ -197,8 +264,39 @@ impl Engine {
             let rb = HeapRb::<f32>::new(192_000 * 2);
             let (producer, consumer) = rb.split();
             capture_jobs.push(CaptureJob {
-                device_id: config.loopback_device.id.clone(),
-                loopback: true,
+                target: CaptureTarget::Device {
+                    device_id: config.loopback_device.id.clone(),
+                    loopback: true,
+                },
+                producer,
+                control: control.clone(),
+                running: running.clone(),
+                error: error.clone(),
+            });
+            render_sources.push(RenderSource {
+                control: control.clone(),
+                consumer,
+                scratch_in: Vec::new(),
+                scratch_out: Vec::new(),
+                resampler: LinearResampler::default(),
+                rate: 0,
+            });
+            controls.push(control);
+        }
+
+        // Per-application process loopback sources.
+        for app in &config.app_sources {
+            let control = SourceControl::new(
+                next_id,
+                app.name.clone(),
+                format!("Aplicativo · PID {}", app.pid),
+                SourceKind::App,
+            );
+            next_id += 1;
+            let rb = HeapRb::<f32>::new(192_000 * 2);
+            let (producer, consumer) = rb.split();
+            capture_jobs.push(CaptureJob {
+                target: CaptureTarget::Process(app.pid),
                 producer,
                 control: control.clone(),
                 running: running.clone(),
@@ -227,8 +325,10 @@ impl Engine {
             let rb = HeapRb::<f32>::new(192_000 * 2);
             let (producer, consumer) = rb.split();
             capture_jobs.push(CaptureJob {
-                device_id: mic.id.clone(),
-                loopback: false,
+                target: CaptureTarget::Device {
+                    device_id: mic.id.clone(),
+                    loopback: false,
+                },
                 producer,
                 control: control.clone(),
                 running: running.clone(),
@@ -250,6 +350,7 @@ impl Engine {
             handles.push(thread::spawn(move || capture_loop(job)));
         }
 
+        let (sound_tx, sound_rx) = mpsc::channel();
         let render_job = RenderJob {
             output_device_id: config.output_device.id.clone(),
             running: running.clone(),
@@ -258,6 +359,9 @@ impl Engine {
             master_peak: master_peak.clone(),
             output_rate: output_rate.clone(),
             sources: render_sources,
+            sound_rx,
+            soundboard_volume: self.soundboard_volume.clone(),
+            soundboard_muted: self.soundboard_muted.clone(),
             error: error.clone(),
         };
         handles.push(thread::spawn(move || render_loop(render_job)));
@@ -267,6 +371,7 @@ impl Engine {
         self.master_muted = master_muted;
         self.master_peak = master_peak;
         self.output_rate = output_rate;
+        self.sound_tx = Some(sound_tx);
         self.sources = controls;
         self.handles = handles;
         self.error = error;
@@ -275,6 +380,7 @@ impl Engine {
 
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
+        self.sound_tx = None;
         for handle in self.handles.drain(..) {
             let _ = handle.join();
         }
@@ -290,9 +396,13 @@ impl Drop for Engine {
     }
 }
 
+enum CaptureTarget {
+    Device { device_id: String, loopback: bool },
+    Process(u32),
+}
+
 struct CaptureJob {
-    device_id: String,
-    loopback: bool,
+    target: CaptureTarget,
     producer: ringbuf::HeapProd<f32>,
     control: SourceControl,
     running: Arc<AtomicBool>,
@@ -308,7 +418,14 @@ fn set_error(error: &Arc<Mutex<Option<String>>>, message: impl Into<String>) {
 }
 
 fn capture_loop(mut job: CaptureJob) {
-    let stream = match CaptureStream::open(&job.device_id, job.loopback) {
+    let stream = match &job.target {
+        CaptureTarget::Device {
+            device_id,
+            loopback,
+        } => CaptureStream::open(device_id, *loopback),
+        CaptureTarget::Process(process_id) => CaptureStream::open_process(*process_id),
+    };
+    let stream = match stream {
         Ok(stream) => stream,
         Err(error) => {
             set_error(&job.error, format!("capture failed: {error:#}"));
@@ -366,7 +483,15 @@ struct RenderJob {
     master_peak: Arc<AtomicU32>,
     output_rate: Arc<AtomicU32>,
     sources: Vec<RenderSource>,
+    sound_rx: Receiver<Arc<Sound>>,
+    soundboard_volume: Arc<AtomicU32>,
+    soundboard_muted: Arc<AtomicBool>,
     error: Arc<Mutex<Option<String>>>,
+}
+
+struct Voice {
+    sound: Arc<Sound>,
+    position: usize,
 }
 
 fn render_loop(mut job: RenderJob) {
@@ -383,6 +508,7 @@ fn render_loop(mut job: RenderJob) {
     let max_frames = stream.buffer_size.max(1) as usize;
     let mut mix = vec![0.0f32; max_frames * 2];
     let mut out_bytes = vec![0u8; max_frames * stream.format.block_align as usize];
+    let mut voices: Vec<Voice> = Vec::new();
     for source in &mut job.sources {
         source.scratch_in.reserve(max_frames * 8 * 2);
         source.scratch_out.reserve(max_frames * 2);
@@ -402,6 +528,10 @@ fn render_loop(mut job: RenderJob) {
         }
         let frames_usize = frames as usize;
         mix[..frames_usize * 2].fill(0.0);
+
+        while let Ok(sound) = job.sound_rx.try_recv() {
+            voices.push(Voice { sound, position: 0 });
+        }
 
         for source in &mut job.sources {
             let src_rate = source.control.sample_rate();
@@ -457,6 +587,24 @@ fn render_loop(mut job: RenderJob) {
                     *target += *sample * volume;
                 }
             }
+        }
+
+        if !job.soundboard_muted.load(Ordering::Relaxed) {
+            let volume = f32::from_bits(job.soundboard_volume.load(Ordering::Relaxed));
+            for voice in &mut voices {
+                let start = voice.position * 2;
+                let remaining = voice.sound.samples.len().saturating_sub(start);
+                let count = remaining.min(frames_usize * 2);
+                for (target, sample) in mix
+                    .iter_mut()
+                    .take(count)
+                    .zip(&voice.sound.samples[start..start + count])
+                {
+                    *target += *sample * volume;
+                }
+                voice.position += count / 2;
+            }
+            voices.retain(|voice| voice.position * 2 < voice.sound.samples.len());
         }
 
         let master = if job.master_muted.load(Ordering::Relaxed) {
@@ -539,50 +687,11 @@ fn sample_at(input: &[f32], in_frames: usize, index: isize, fallback: [f32; 2]) 
     }
 }
 
-/// Decode a WAV file to interleaved stereo f32 at the given sample rate.
-pub fn decode_wav(path: &std::path::Path, target_rate: u32) -> Result<Vec<f32>> {
-    let mut reader = hound::WavReader::open(path)
-        .with_context(|| format!("failed to open sound {}", path.display()))?;
-    let spec = reader.spec();
-    let channels = spec.channels as usize;
-    let source_rate = spec.sample_rate;
-    let mut samples: Vec<f32> = Vec::new();
-
-    match spec.sample_format {
-        hound::SampleFormat::Float => {
-            for sample in reader.samples::<f32>() {
-                samples.push(sample.context("failed to read a WAV sample")?);
-            }
-        }
-        hound::SampleFormat::Int => {
-            let max = (1i64 << (spec.bits_per_sample.saturating_sub(1) as u32)) as f32;
-            for sample in reader.samples::<i32>() {
-                samples.push(sample.context("failed to read a WAV sample")? as f32 / max);
-            }
-        }
-    }
-
-    if channels == 0 {
-        bail!("WAV file has no channels");
-    }
-    let frames = samples.len() / channels;
-    let mut stereo = Vec::with_capacity(frames * 2);
-    for frame in 0..frames {
-        let base = frame * channels;
-        let left = samples[base];
-        let right = if channels >= 2 {
-            samples[base + 1]
-        } else {
-            left
-        };
-        stereo.push(left);
-        stereo.push(right);
-    }
-
+fn resample_stereo(stereo: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
     if source_rate == target_rate || target_rate == 0 {
-        return Ok(stereo);
+        return stereo.to_vec();
     }
-    // Offline linear resampling (fine for short soundboard clips).
+    let frames = stereo.len() / 2;
     let ratio = source_rate as f64 / target_rate as f64;
     let out_frames = ((frames as f64) / ratio).round() as usize;
     let mut out = Vec::with_capacity(out_frames * 2);
@@ -603,5 +712,61 @@ pub fn decode_wav(path: &std::path::Path, target_rate: u32) -> Result<Vec<f32>> 
         out.push(first[0] + (second[0] - first[0]) * fraction);
         out.push(first[1] + (second[1] - first[1]) * fraction);
     }
-    Ok(out)
+    out
+}
+
+/// Decodes a sound file (WAV, MP3, FLAC, OGG, AAC) to interleaved stereo f32 at
+/// the requested sample rate.
+pub fn decode_audio(path: &Path, target_rate: u32) -> Result<Vec<f32>> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open sound {}", path.display()))?;
+    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+        hint.with_extension(extension);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            stream,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .with_context(|| format!("failed to detect sound format {}", path.display()))?;
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .context("the sound file has no default audio track")?;
+    let track_id = track.id;
+    let source_rate = track.codec_params.sample_rate.unwrap_or(48_000);
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .context("failed to create the audio decoder")?;
+
+    let mut stereo = Vec::new();
+    while let Ok(packet) = format.next_packet() {
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(error) => return Err(error).context("failed to decode the sound file"),
+        };
+        let spec = *decoded.spec();
+        let channels = spec.channels.count();
+        let mut buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
+        buffer.copy_interleaved_ref(decoded);
+        for frame in buffer.samples().chunks(channels.max(1)) {
+            let left = frame.first().copied().unwrap_or(0.0);
+            let right = frame.get(1).copied().unwrap_or(left);
+            stereo.push(left);
+            stereo.push(right);
+        }
+    }
+
+    if stereo.is_empty() {
+        bail!("no audio samples were decoded from {}", path.display());
+    }
+    Ok(resample_stereo(&stereo, source_rate, target_rate))
 }
