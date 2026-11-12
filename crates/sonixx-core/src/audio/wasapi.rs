@@ -432,11 +432,12 @@ fn write_sample(out: &mut [u8], offset: usize, value: f32, bits: u16, is_float: 
 
 #[derive(Clone, Debug)]
 pub struct AudioSession {
+    pub key: String,
     pub pid: u32,
     pub name: String,
     pub peak: f32,
-    pub session_id: String,
     pub exe: Option<String>,
+    pub sessions: usize,
 }
 
 fn process_exe(pid: u32) -> Option<String> {
@@ -482,6 +483,110 @@ fn is_system_process(exe: &str) -> bool {
         .any(|needle| exe.ends_with(needle))
 }
 
+fn is_helper_process(name: &str) -> bool {
+    let name = name.to_lowercase();
+    [
+        "msedgewebview2.exe",
+        "webviewhost.exe",
+        "crashpad_handler.exe",
+    ]
+    .iter()
+    .any(|needle| name.ends_with(needle))
+}
+
+fn is_shell_process(name: &str) -> bool {
+    let name = name.to_lowercase();
+    [
+        "explorer.exe",
+        "services.exe",
+        "svchost.exe",
+        "system",
+        "idle",
+        "registry",
+    ]
+    .iter()
+    .any(|needle| name.ends_with(needle))
+}
+
+fn friendly_name(name: &str) -> Option<&'static str> {
+    match name.to_lowercase().as_str() {
+        "chrome.exe" => Some("Google Chrome"),
+        "ms-teams.exe" => Some("Microsoft Teams"),
+        "msedge.exe" => Some("Microsoft Edge"),
+        "msedgewebview2.exe" => Some("WebView2"),
+        "thunderbird.exe" => Some("Mozilla Thunderbird"),
+        "mremoteng.exe" => Some("mRemoteNG"),
+        "opencode.exe" => Some("OpenCode"),
+        "teamviewer.exe" => Some("TeamViewer"),
+        "spotify.exe" => Some("Spotify"),
+        "discord.exe" => Some("Discord"),
+        "firefox.exe" => Some("Mozilla Firefox"),
+        _ => None,
+    }
+}
+
+fn process_display_name(system: Option<&sysinfo::System>, pid: u32, exe: Option<&str>) -> String {
+    if let Some(system) = system {
+        if let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) {
+            let name = process.name().to_string_lossy().to_string();
+            if !name.is_empty() {
+                return friendly_name(&name).unwrap_or(name.as_str()).to_string();
+            }
+        }
+    }
+    let name = exe
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Aplicativo".to_string());
+    friendly_name(&name).unwrap_or(name.as_str()).to_string()
+}
+
+/// If the session belongs to a WebView2/helper process, group it under the
+/// parent application so the UI shows the real app, not the helper.
+fn resolve_root(
+    system: Option<&sysinfo::System>,
+    pid: u32,
+    exe: Option<&str>,
+) -> (u32, String, Option<String>) {
+    let own_name = exe
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if is_helper_process(&own_name) {
+        if let Some(system) = system {
+            if let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) {
+                if let Some(parent) = process.parent() {
+                    let parent_pid = parent.as_u32();
+                    let parent_name = system
+                        .process(parent)
+                        .map(|process| process.name().to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if parent_pid != 0 && !parent_name.is_empty() && !is_shell_process(&parent_name)
+                    {
+                        let parent_exe = process_exe(parent_pid).or_else(|| {
+                            system
+                                .process(parent)
+                                .and_then(|process| process.exe())
+                                .map(|path| path.to_string_lossy().to_string())
+                        });
+                        let name = friendly_name(&parent_name)
+                            .map(|name| name.to_string())
+                            .unwrap_or(parent_name);
+                        return (parent_pid, name, parent_exe);
+                    }
+                }
+            }
+        }
+    }
+
+    (
+        pid,
+        process_display_name(system, pid, exe),
+        exe.map(|path| path.to_string()),
+    )
+}
+
 /// Lists applications that currently have an audio session on the default
 /// playback device. This is what the UI shows in the "Aplicativos" tab.
 pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
@@ -508,8 +613,8 @@ pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
             .context("failed to count audio sessions")?
     };
 
-    let mut system: Option<sysinfo::System> = None;
-    let mut found = Vec::new();
+    let system = sysinfo::System::new_all().ok();
+    let mut groups: std::collections::HashMap<u32, AudioSession> = std::collections::HashMap::new();
     for index in 0..count {
         let Ok(control) = (unsafe { sessions.GetSession(index) }) else {
             continue;
@@ -546,32 +651,12 @@ pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
                 continue;
             }
         }
-        let name = if display.trim().is_empty() {
-            if system.is_none() {
-                system = sysinfo::System::new_all().ok();
-            }
-            system
-                .as_ref()
-                .and_then(|system| system.process(sysinfo::Pid::from_u32(pid)))
-                .map(|process| process.name().to_string_lossy().to_string())
-                .unwrap_or_default()
-        } else {
-            display
-        };
-        if name.trim().is_empty() || is_input_like_name(&name) {
-            continue;
-        }
-        let session_id = unsafe {
-            control2
-                .GetSessionIdentifier()
-                .ok()
-                .map(|text| {
-                    let value = text.to_string().unwrap_or_default();
-                    CoTaskMemFree(Some(text.0 as *const core::ffi::c_void));
-                    value
-                })
-                .unwrap_or_default()
-        };
+        let own_name = exe
+            .as_deref()
+            .and_then(|path| std::path::Path::new(path).file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+
         // Peak meter of this specific session. This reads the samples that
         // already left the application, without opening a capture stream.
         let peak = control
@@ -579,16 +664,45 @@ pub fn list_audio_sessions() -> Result<Vec<AudioSession>> {
             .ok()
             .and_then(|meter| unsafe { meter.GetPeakValue().ok() })
             .unwrap_or(0.0);
-        found.push(AudioSession {
-            pid,
-            name,
-            peak,
-            session_id,
-            exe,
+
+        // A silent WebView2/crashpad helper is not an app the user opened; its
+        // parent app (Teams, OpenCode, ...) will represent it when it has audio.
+        if is_helper_process(&own_name) && peak <= 0.001 {
+            continue;
+        }
+
+        let (root_pid, root_name, root_exe) = resolve_root(system.as_ref(), pid, exe.as_deref());
+        let display_name = if display.trim().is_empty()
+            || display.to_lowercase().ends_with(".exe")
+            || display.eq_ignore_ascii_case(&own_name)
+        {
+            root_name
+        } else {
+            display
+        };
+        if display_name.trim().is_empty() || is_input_like_name(&display_name) {
+            continue;
+        }
+
+        let entry = groups.entry(root_pid).or_insert_with(|| AudioSession {
+            key: format!("pid:{root_pid}"),
+            pid: root_pid,
+            name: display_name.clone(),
+            peak: 0.0,
+            exe: root_exe.clone(),
+            sessions: 0,
         });
+        entry.peak = entry.peak.max(peak);
+        entry.sessions += 1;
+        if entry.name.trim().is_empty() || entry.name.to_lowercase().ends_with(".exe") {
+            entry.name = display_name;
+        }
+        if entry.exe.is_none() {
+            entry.exe = root_exe;
+        }
     }
-    found.sort_by(|a, b| a.session_id.cmp(&b.session_id));
-    found.dedup_by(|a, b| !a.session_id.is_empty() && a.session_id == b.session_id);
+
+    let mut found: Vec<AudioSession> = groups.into_values().collect();
     found.sort_by_key(|session| session.name.to_lowercase());
     Ok(found)
 }

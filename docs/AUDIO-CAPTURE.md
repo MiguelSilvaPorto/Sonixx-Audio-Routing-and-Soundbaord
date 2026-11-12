@@ -115,6 +115,19 @@ dispositivo virtual) continua sendo necessário.
 - Captura por aplicativo implementada com process loopback.
 - Engine de captura/render e soundboard em Rust.
 
+## Sessões, processos e WebView2
+
+O Windows pode criar **várias sessões para o mesmo processo** (o Teams costuma
+ter uma de mídia e outra de comunicações). O detector agrupa por processo raiz e
+soma os picos; o cartão mostra `2 sessões` em vez de duplicar o app.
+
+Processos auxiliares como `msedgewebview2.exe`, `webviewhost.exe` e
+`crashpad_handler.exe` não são apps abertos pelo usuário: eles são mapeados para
+o processo pai (Teams, OpenCode etc.) e usam o nome/ícone do pai. Um helper
+silencioso e sem pai identificável é ocultado. A captura por aplicativo usa o
+PID raiz com `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`, então também
+inclui os filhos (WebView2) do app.
+
 ## Abas do Chrome
 
 O dump de sessões mostra o Chrome como **uma única sessão**:

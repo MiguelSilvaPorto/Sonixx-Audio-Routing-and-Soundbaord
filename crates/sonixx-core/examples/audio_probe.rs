@@ -16,10 +16,9 @@ fn main() -> Result<()> {
             .and_then(|path| std::path::Path::new(path).file_name())
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "?".to_string());
-        let id = session.session_id.rsplit('|').next().unwrap_or("");
         println!(
-            " pid={:<6} peak={:.3} exe={:<24} sid={}  {}",
-            session.pid, session.peak, exe, id, session.name
+            " pid={:<6} peak={:.3} sessions={} exe={:<24} key={}  {}",
+            session.pid, session.peak, session.sessions, exe, session.key, session.name
         );
     }
 

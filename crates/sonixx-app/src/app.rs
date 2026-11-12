@@ -186,12 +186,12 @@ impl SonixxApp {
         if !self
             .sessions
             .iter()
-            .any(|session| session.session_id == self.app_choice_session)
+            .any(|session| session.key == self.app_choice_session)
         {
             self.app_choice_session = self
                 .sessions
                 .first()
-                .map(|session| session.session_id.clone())
+                .map(|session| session.key.clone())
                 .unwrap_or_default();
         }
     }
@@ -805,13 +805,13 @@ impl eframe::App for SonixxApp {
         if add_app {
             if let Some(session) = sessions
                 .iter()
-                .find(|session| session.session_id == self.app_choice_session)
+                .find(|session| session.key == self.app_choice_session)
                 .cloned()
             {
                 if !self
                     .selected_apps
                     .iter()
-                    .any(|selected| selected.session_id == session.session_id)
+                    .any(|selected| selected.key == session.key)
                 {
                     self.selected_apps.push(session);
                 }
@@ -1076,7 +1076,7 @@ impl eframe::App for SonixxApp {
             if !self
                 .selected_apps
                 .iter()
-                .any(|selected| selected.session_id == session.session_id)
+                .any(|selected| selected.key == session.key)
             {
                 self.selected_apps.push(session);
             }
@@ -1119,13 +1119,21 @@ fn session_label(session: &AudioSession) -> String {
     } else {
         ""
     };
-    format!("{} (PID {}){activity}", session.name, session.pid)
+    let sessions = if session.sessions > 1 {
+        format!(" · {} sessões", session.sessions)
+    } else {
+        String::new()
+    };
+    format!(
+        "{} (PID {}){}{activity}",
+        session.name, session.pid, sessions
+    )
 }
 
 fn session_combo(ui: &mut egui::Ui, salt: &str, selected: &mut String, sessions: &[AudioSession]) {
     let current = sessions
         .iter()
-        .find(|session| session.session_id == *selected)
+        .find(|session| session.key == *selected)
         .map(session_label)
         .unwrap_or_else(|| "Selecionar...".to_string());
     egui::ComboBox::from_id_salt(salt)
@@ -1133,7 +1141,7 @@ fn session_combo(ui: &mut egui::Ui, salt: &str, selected: &mut String, sessions:
         .width(ui.available_width())
         .show_ui(ui, |ui| {
             for session in sessions {
-                ui.selectable_value(selected, session.session_id.clone(), session_label(session));
+                ui.selectable_value(selected, session.key.clone(), session_label(session));
             }
         });
 }
@@ -1168,11 +1176,12 @@ fn detected_session_card(
             ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new(session.name.as_str()).strong().size(14.0));
-                ui.label(
-                    RichText::new(format!("Sessão de áudio · PID {}", session.pid))
-                        .size(11.0)
-                        .color(MUTED),
-                );
+                let detail = if session.sessions > 1 {
+                    format!("{} sessões · PID {}", session.sessions, session.pid)
+                } else {
+                    format!("Sessão de áudio · PID {}", session.pid)
+                };
+                ui.label(RichText::new(detail).size(11.0).color(MUTED));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui

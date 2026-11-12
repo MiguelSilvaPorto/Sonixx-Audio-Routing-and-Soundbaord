@@ -19,6 +19,9 @@ Implementado:
   (`IAudioMeterInformation`), sem captura e sem driver.
 - **Ícones reais** extraídos do executável de cada aplicativo (Shell do Windows),
   com filtro de sessões de microfone e de processos do sistema.
+- **Sessões agrupadas por aplicativo**: duas sessões do Teams viram um cartão
+  “2 sessões”; WebView2/crashpad são mapeados ao app pai em vez de aparecerem
+  como aplicativos separados.
 - **UI visual e interativa**: sliders com trilha/preenchimento, gráfico de
   atividade em tempo real, ações rápidas “+ Mixagem”, botão do instalador
   VB-Cable e tiles do soundboard.
